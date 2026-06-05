@@ -1,0 +1,7 @@
+{
+  "name": "trust-wallet-core",
+  "version": "1.0.0",
+  "description": "Trust Wallet Core Expo native module",
+  "main": "src/index.ts",
+  "license": "MIT"
+}

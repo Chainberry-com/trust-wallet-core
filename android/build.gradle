@@ -1,0 +1,67 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+apply from: new File(
+  providers.exec {
+    workingDir(rootDir)
+    commandLine("node", "--print", "require.resolve('expo-modules-core/package.json')")
+  }.standardOutput.asText.get().trim(),
+  "../android/ExpoModulesCorePlugin.gradle"
+)
+
+applyKotlinExpoModulesCorePlugin()
+
+android {
+  namespace 'expo.modules.trustwalletcore'
+  compileSdkVersion 35
+
+  defaultConfig {
+    minSdkVersion 24
+    targetSdkVersion 35
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  kotlinOptions {
+    jvmTarget = '17'
+  }
+}
+
+// ─── wallet-core credentials ──────────────────────────────────────────────────
+// GitHub Packages requires auth even for public packages.
+// Priority order (first non-empty wins):
+//   1. Env vars     GITHUB_ACTOR / GITHUB_TOKEN       (CI / one-off terminal)
+//   2. Gradle props gpr.user / gpr.key in             (permanent dev setup)
+//        ~/.gradle/gradle.properties
+//
+// One-time dev setup — paste into ~/.gradle/gradle.properties:
+//   gpr.user=your-github-username
+//   gpr.key=ghp_xxxxxxxxxxxx   (classic PAT, read:packages scope only)
+//
+// Generate a token at: github.com/settings/tokens → "classic" → check read:packages
+
+def githubUser  = System.getenv("GITHUB_ACTOR")
+    ?: (project.hasProperty("gpr.user")  ? project.property("gpr.user")  : "")
+def githubToken = System.getenv("GITHUB_TOKEN")
+    ?: (project.hasProperty("gpr.key")   ? project.property("gpr.key")   : "")
+
+repositories {
+  maven {
+    url = uri("https://maven.pkg.github.com/trustwallet/wallet-core")
+    credentials {
+      username = githubUser
+      password = githubToken
+    }
+  }
+}
+
+useCoreDependencies()
+
+dependencies {
+  // Check github.com/trustwallet/wallet-core/releases for the latest version
+  implementation 'com.trustwallet:wallet-core:4.1.19'
+  implementation 'com.google.protobuf:protobuf-javalite:3.21.9'
+}

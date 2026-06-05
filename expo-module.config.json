@@ -1,0 +1,9 @@
+{
+  "platforms": ["ios", "android"],
+  "ios": {
+    "modules": ["TrustWalletCoreModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.trustwalletcore.TrustWalletCoreModule"]
+  }
+}
