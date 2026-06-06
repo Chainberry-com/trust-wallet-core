@@ -121,6 +121,7 @@ class TrustWalletCoreModule : Module() {
 private fun resolveCoinType(coin: String): CoinType = when (coin.lowercase()) {
   "ethereum" -> CoinType.ETHEREUM
   "solana"   -> CoinType.SOLANA
+  "bnb"      -> CoinType.SMARTCHAIN
   else       -> throw IllegalArgumentException("Unsupported coin: $coin")
 }
 

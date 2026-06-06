@@ -118,6 +118,7 @@ public class TrustWalletCoreModule: Module {
     switch coin.lowercased() {
     case "ethereum": return .ethereum
     case "solana":   return .solana
+    case "bnb":      return .smartChain
     default:
       throw Exception(name: "UnsupportedCoin", description: "Unsupported coin: \(coin)")
     }
