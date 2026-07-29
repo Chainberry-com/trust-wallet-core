@@ -1,7 +1,21 @@
 {
-  "name": "trust-wallet-core",
+  "name": "@chainberry/trust-wallet-core",
   "version": "1.0.0",
-  "description": "Trust Wallet Core Expo native module",
+  "description": "Expo native module wrapping Trust Wallet Core for HD wallet generation, address derivation, and transaction signing (Ethereum, Solana, BNB)",
   "main": "src/index.ts",
-  "license": "MIT"
+  "types": "src/index.ts",
+  "license": "MIT",
+  "files": [
+    "src",
+    "ios/TrustWalletCoreModule.swift",
+    "android/src",
+    "android/build.gradle",
+    "expo-module.config.json",
+    "TrustWalletCoreModule.podspec",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "expo": "*",
+    "expo-modules-core": "*"
+  }
 }

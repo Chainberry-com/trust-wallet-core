@@ -28,7 +28,7 @@ export async function generateWallet(
   const coins: SupportedCoin[] = ["ethereum", "solana", "bnb"];
   const entries = await Promise.all(
     coins.map(async (coin) => {
-      const { address, privateKey } = await getAddressForCoin(
+      const { address } = await getAddressForCoin(
         mnemonic,
         coin,
         passphrase,
@@ -51,7 +51,7 @@ export async function restoreWallet(
   const coins: SupportedCoin[] = ["ethereum", "solana", "bnb"];
   const entries = await Promise.all(
     coins.map(async (coin) => {
-      const { address, privateKey } = await getAddressForCoin(
+      const { address } = await getAddressForCoin(
         mnemonic,
         coin,
         passphrase,
