@@ -64,4 +64,6 @@ dependencies {
   // Check github.com/trustwallet/wallet-core/releases for the latest version
   implementation 'com.trustwallet:wallet-core:4.1.19'
   implementation 'com.google.protobuf:protobuf-javalite:3.21.9'
+  // BiometricPrompt (biometry-or-device-credential gating on the Keystore-backed wallet cipher)
+  implementation 'androidx.biometric:biometric:1.1.0'
 }

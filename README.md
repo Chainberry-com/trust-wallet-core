@@ -2,7 +2,7 @@
 
 Expo native module wrapping [Trust Wallet Core](https://github.com/trustwallet/wallet-core) for HD wallet generation, address derivation, and transaction signing. Runs the real native library (Kotlin/JNI on Android, Swift on iOS) — not the WASM build, so it works fine under Hermes.
 
-Supported coins: Ethereum, Solana, BNB Smart Chain (see `SupportedCoin`).
+Supported chains: Ethereum, BNB Smart Chain, Polygon, Solana, Tron, TON, Bitcoin, Bitcoin Cash (address derivation only — see Security model), Litecoin, XRP (see `Chain`).
 
 ## Installation
 
@@ -35,30 +35,45 @@ Generate a token at github.com/settings/tokens → "classic" → check `read:pac
 
 ### iOS
 
-`WalletCore` is pulled in via CocoaPods (`s.dependency 'TrustWalletCore'`) — no extra auth needed, `pod install` handles it.
+`WalletCore` is pulled in via CocoaPods (`s.dependency 'TrustWalletCore'`) — no extra auth needed, `pod install` handles it. Biometric/passcode gating uses `LocalAuthentication` (system framework, no extra dependency).
+
+Android biometric gating additionally pulls in `androidx.biometric:biometric:1.1.0`.
 
 ## Usage
 
 ```ts
-import { generateWallet, restoreWallet, getAddressForCoin } from "@chainberry/trust-wallet-core";
+import { createWallet, importWallet, signTransaction, exportMnemonic } from "@chainberry/trust-wallet-core";
 
-const { mnemonic, wallets } = await generateWallet(); // 128-bit / 12-word by default
-// wallets: { ethereum: "0x...", solana: "...", bnb: "0x..." }
+const { walletId, addresses } = await createWallet(); // 128-bit / 12-word by default
+// addresses: { ethereum: "0x...", solana: "...", bnb: "0x...", bitcoin: "...", ... }
 
-const restored = await restoreWallet(mnemonic);
+const restored = await importWallet(mnemonic);
 
-const { address, privateKey } = await getAddressForCoin(mnemonic, "ethereum");
+// Triggers a native biometry/passcode prompt; only signed tx bytes/hex cross back to JS.
+const { signedTx } = await signTransaction(walletId, "ethereum", unsignedTx);
+
+// Explicit backup flow only — biometry/passcode gated.
+const mnemonic = await exportMnemonic(walletId);
 ```
 
 ## API
 
-- `generateWallet(strength = 128, passphrase = "")` — creates a new BIP-39 mnemonic (128 = 12 words, 256 = 24 words) and returns it along with the derived address for every supported coin.
-- `restoreWallet(mnemonic, passphrase = "")` — validates an existing mnemonic and returns the same shape as `generateWallet`. Throws if the mnemonic is invalid.
-- `getAddressForCoin(mnemonic, coin, passphrase = "")` — derives `{ address, privateKey }` for a single coin (`"ethereum" | "solana" | "bnb"`).
+- `createWallet(strength = 128, passphrase = "")` — generates a new BIP-39 mnemonic and persists it natively (Keychain on iOS / Keystore-backed file on Android, biometry-or-passcode gated). Returns `{ walletId, addresses }` — the mnemonic itself never leaves native code.
+- `importWallet(mnemonic, passphrase = "")` — validates and persists an existing mnemonic the same way. The `mnemonic` argument is a one-time exposure from the caller (e.g. a text-entry backup-restore screen); discard your own copy immediately after this call resolves.
+- `listWallets()` — returns `{ walletId, addresses }[]` for every persisted wallet, reading only the ungated metadata store. No biometric prompt.
+- `deleteWallet(walletId)` — removes the wallet's native key material and metadata entry. Irreversible; not biometric-gated (deleting reveals nothing, so this is a UX confirmation concern, not a key-secrecy one).
+- `signTransaction(walletId, chain, unsignedTx)` — triggers a native biometry/passcode prompt, then derives the key and signs entirely inside native code. Returns `{ signedTx, meta? }`; `meta` currently only carries TON's `txHash`.
+- `exportMnemonic(walletId)` — the one sanctioned mnemonic exposure. Biometry/passcode gated. Use only for an explicit "reveal recovery phrase" backup screen; don't hold the result in app state beyond that screen's lifetime.
 
-## Security note
+## Security model
 
-`getAddressForCoin` returns the raw private key as hex to JS. That's a deliberate tradeoff for this module — it does no key storage or signing orchestration itself, it only derives keys. Callers are responsible for how the mnemonic and private keys are held, encrypted at rest, and cleared from memory. Don't treat this module as a secure enclave; it isn't one.
+Mnemonic and derived private keys are generated, persisted, and used for signing entirely inside this module's native code (Swift/Kotlin) — they are never serialized back across the JS bridge, with the single exception of `exportMnemonic`'s explicit backup flow. This is a deliberate change from this module's earlier version, which returned raw private keys to JS on every address derivation; that let a compromised/malicious JS dependency, an attached JS debugger, or a JS-heap memory dump read wallet secrets in full. Now the JS runtime never holds them at all.
+
+Storage: one biometry-or-passcode-gated secret per wallet (`SecAccessControl` + iOS Keychain; a hardware-backed Android Keystore AES key gating an encrypted on-disk file), plus a separate, ungated metadata entry (`walletId` → addresses) for read-only UI that shouldn't need a biometric prompt just to show an address or balance.
+
+Bitcoin Cash is derivation-only: sending BCH is unsupported both here and upstream (`chainberry-wallet`'s self-custody transaction preparation has no BCH case), so this module only derives its address.
+
+**Not yet verified against a real device/build**: the per-chain `SigningInput` field mappings for Bitcoin, Litecoin, Tron, XRP, and TON, and Solana's raw-transaction signing mode, were written against the general Trust Wallet Core API shape but haven't been compiled or run against this module's pinned `wallet-core` version. Confirm field names and produce byte-for-byte signed-output parity against the previous JS-based signers (or a testnet broadcast) before trusting any of these chains with real funds. Ethereum/BNB/Polygon signing is a straightforward reshape of what this module already proved out.
 
 ## License
 

@@ -1,145 +1,107 @@
 import ExpoModulesCore
 import WalletCore
+import LocalAuthentication
 
-// All numeric transaction fields are bare hex strings (no 0x prefix) to avoid JS number precision loss.
+// Mnemonic/private-key material never crosses back to JS except `exportMnemonic` — an
+// explicit, biometric/passcode-gated backup flow. Every other method returns only
+// walletIds, addresses, or signed transaction bytes/hex.
 public class TrustWalletCoreModule: Module {
   public func definition() -> ModuleDefinition {
     Name("TrustWalletCore")
 
-    // Returns { mnemonic } — strength 128 = 12 words, 256 = 24 words
-    AsyncFunction("generateWallet") { (strength: Int, passphrase: String) throws -> [String: String] in
+    // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses }.
+    AsyncFunction("createWallet") { (strength: Int, passphrase: String) throws -> [String: Any] in
       guard let wallet = HDWallet(strength: UInt32(strength), passphrase: passphrase) else {
         throw Exception(name: "WalletError", description: "Failed to generate wallet")
       }
-      return ["mnemonic": wallet.mnemonic]
+      return try Self.persistNewWallet(wallet: wallet)
     }
 
-    // Validates mnemonic and returns { mnemonic }
-    AsyncFunction("restoreWallet") { (mnemonic: String, passphrase: String) throws -> [String: String] in
-      guard HDWallet(mnemonic: mnemonic, passphrase: passphrase) != nil else {
-        throw Exception(name: "InvalidMnemonic", description: "Invalid mnemonic phrase")
-      }
-      return ["mnemonic": mnemonic]
-    }
-
-    // Derives address and private key for a named coin
-    // coin: "ethereum" | "solana"
-    AsyncFunction("getAddressForCoin") { (mnemonic: String, coin: String, passphrase: String) throws -> [String: String] in
+    // One-time mnemonic exposure from JS, at import only — never retained after this call.
+    // Returns { walletId, addresses }.
+    AsyncFunction("importWallet") { (mnemonic: String, passphrase: String) throws -> [String: Any] in
       guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: passphrase) else {
         throw Exception(name: "InvalidMnemonic", description: "Invalid mnemonic phrase")
       }
-      let coinType = try Self.resolveCoinType(coin)
-      return [
-        "address":    wallet.getAddressForCoin(coin: coinType),
-        "privateKey": wallet.getKeyForCoin(coin: coinType).data.hexString,
-      ]
+      return try Self.persistNewWallet(wallet: wallet)
     }
 
-    // Signs an Ethereum transaction; returns 0x-prefixed RLP-encoded signed tx hex
-    // txParams: { to, valueHex, nonce, gasLimitHex, chainId, dataHex?,
-    //             gasPriceHex? (legacy) | maxFeePerGasHex + maxPriorityFeePerGasHex (EIP-1559) }
-    AsyncFunction("signEthereumTransaction") { (privateKeyHex: String, txParams: [String: Any]) throws -> String in
-      guard let pkData = Data(hexString: privateKeyHex),
-            let privateKey = PrivateKey(data: pkData) else {
-        throw Exception(name: "InvalidKey", description: "Invalid private key hex")
+    // Reads only the ungated metadata store — no biometric prompt.
+    AsyncFunction("listWallets") { () -> [[String: Any]] in
+      NativeWalletStore.loadMetadata().map { walletId, addresses in
+        ["walletId": walletId, "addresses": addresses]
       }
-      guard let to       = txParams["to"] as? String,
-            let nonce    = txParams["nonce"] as? Int,
-            let gasLimHex = txParams["gasLimitHex"] as? String,
-            let chainId  = txParams["chainId"] as? Int else {
-        throw Exception(name: "InvalidParams", description: "Missing required tx params")
-      }
-      let valueHex = (txParams["valueHex"] as? String) ?? "0"
-      let dataHex  = (txParams["dataHex"]  as? String) ?? ""
-
-      var input = EthereumSigningInput()
-      input.chainID    = Self.intToData(chainId)
-      input.nonce      = Self.intToData(nonce)
-      input.gasLimit   = Self.hexData(gasLimHex) ?? Data()
-      input.toAddress  = to
-      input.privateKey = privateKey.data
-      if !dataHex.isEmpty { input.txData = Self.hexData(dataHex) ?? Data() }
-
-      var transfer = EthereumTransaction.Transfer()
-      transfer.amount = Self.hexData(valueHex) ?? Data([0])
-      var tx = EthereumTransaction()
-      tx.transfer = transfer
-      input.transaction = tx
-
-      if let gasPriceHex = txParams["gasPriceHex"] as? String {
-        input.gasPrice = Self.hexData(gasPriceHex) ?? Data()
-      } else if let mfHex = txParams["maxFeePerGasHex"] as? String,
-                let pfHex = txParams["maxPriorityFeePerGasHex"] as? String {
-        input.maxFeePerGas          = Self.hexData(mfHex) ?? Data()
-        input.maxInclusionFeePerGas = Self.hexData(pfHex) ?? Data()
-      }
-
-      let output: EthereumSigningOutput = AnySigner.sign(input: input, coin: .ethereum)
-      guard output.error == .ok else {
-        throw Exception(name: "SigningFailed", description: output.errorMessage)
-      }
-      return "0x" + output.encoded.hexString
     }
 
-    // Signs a Solana transfer; returns base64-encoded signed transaction
-    // txParams: { to, lamports (string), recentBlockhash }
-    AsyncFunction("signSolanaTransaction") { (privateKeyHex: String, txParams: [String: Any]) throws -> String in
-      guard let pkData = Data(hexString: privateKeyHex),
-            let privateKey = PrivateKey(data: pkData) else {
-        throw Exception(name: "InvalidKey", description: "Invalid private key hex")
-      }
-      guard let to             = txParams["to"] as? String,
-            let lamportsStr    = txParams["lamports"] as? String,
-            let lamports       = UInt64(lamportsStr),
-            let recentBlockhash = txParams["recentBlockhash"] as? String else {
-        throw Exception(name: "InvalidParams", description: "Missing required Solana tx params (to, lamports, recentBlockhash)")
-      }
+    AsyncFunction("deleteWallet") { (walletId: String) throws -> Void in
+      NativeWalletStore.deleteMnemonic(walletId: walletId)
+      var metadata = NativeWalletStore.loadMetadata()
+      metadata.removeValue(forKey: walletId)
+      try NativeWalletStore.saveMetadata(metadata)
+    }
 
-      var transfer = SolanaTransfer()
-      transfer.recipient = to
-      transfer.value = lamports
-
-      var input = SolanaSigningInput()
-      input.recentBlockhash      = recentBlockhash
-      input.privateKey           = privateKey.data
-      input.transferTransaction  = transfer
-
-      let output: SolanaSigningOutput = AnySigner.sign(input: input, coin: .solana)
-      guard output.error == .ok else {
-        throw Exception(name: "SigningFailed", description: output.errorMessage)
+    // Triggers the native biometry/passcode prompt, then signs entirely in-process.
+    // Returns { signedTx, meta? }.
+    AsyncFunction("signTransaction") { (walletId: String, chain: String, unsignedTx: [String: Any]) throws -> [String: Any] in
+      let chainKey = try ChainKey(fromJs: chain)
+      let context = try await Self.authenticatedContext(reason: "Sign transaction")
+      let mnemonic = try NativeWalletStore.loadMnemonic(walletId: walletId, context: context)
+      guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: "") else {
+        throw Exception(name: "InvalidMnemonic", description: "Stored mnemonic failed validation")
       }
-      return output.encoded
+      let result = try ChainSigner.sign(chain: chainKey, wallet: wallet, unsignedTx: unsignedTx)
+      var response: [String: Any] = ["signedTx": result.signedTx]
+      if let meta = result.meta { response["meta"] = meta }
+      return response
+    }
+
+    // The one sanctioned mnemonic exposure — explicit backup flow only.
+    AsyncFunction("exportMnemonic") { (walletId: String) throws -> String in
+      let context = try await Self.authenticatedContext(reason: "Reveal recovery phrase")
+      return try NativeWalletStore.loadMnemonic(walletId: walletId, context: context)
     }
   }
 
   // MARK: - Helpers
 
-  private static func resolveCoinType(_ coin: String) throws -> CoinType {
-    switch coin.lowercased() {
-    case "ethereum": return .ethereum
-    case "solana":   return .solana
-    case "bnb":      return .smartChain
-    default:
-      throw Exception(name: "UnsupportedCoin", description: "Unsupported coin: \(coin)")
+  private static func persistNewWallet(wallet: HDWallet) throws -> [String: Any] {
+    let walletId = UUID().uuidString
+    var addresses: [String: String] = [:]
+    for chain in ChainKey.allCases {
+      addresses[chain.rawValue] = wallet.getAddressForCoin(coin: chain.coinType)
     }
+
+    try NativeWalletStore.saveMnemonic(wallet.mnemonic, walletId: walletId)
+    var metadata = NativeWalletStore.loadMetadata()
+    metadata[walletId] = addresses
+    try NativeWalletStore.saveMetadata(metadata)
+
+    return ["walletId": walletId, "addresses": addresses]
   }
 
-  // Parses a hex string (with or without 0x, odd or even length) into Data
-  private static func hexData(_ hex: String) -> Data? {
-    let s = hex.hasPrefix("0x") ? String(hex.dropFirst(2)) : hex
-    let padded = s.count % 2 == 0 ? s : "0" + s
-    return padded.isEmpty ? Data([0]) : Data(hexString: padded)
-  }
-
-  // Encodes a non-negative integer as minimal big-endian Data
-  private static func intToData(_ value: Int) -> Data {
-    guard value > 0 else { return Data([0]) }
-    var v = value
-    var bytes: [UInt8] = []
-    while v > 0 {
-      bytes.insert(UInt8(v & 0xFF), at: 0)
-      v >>= 8
+  /// Prompts biometry-or-device-passcode via `.deviceOwnerAuthentication` (Apple's
+  /// combined policy — no separate fallback branch needed), then hands back the
+  /// now-authenticated context for a single Keychain read via `kSecUseAuthenticationContext`.
+  private static func authenticatedContext(reason: String) async throws -> LAContext {
+    let context = LAContext()
+    var evalError: NSError?
+    guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &evalError) else {
+      throw Exception(
+        name: "BiometryUnavailable",
+        description: evalError?.localizedDescription ?? "No biometry or device passcode is set up"
+      )
     }
-    return Data(bytes)
+    return try await withCheckedThrowingContinuation { continuation in
+      context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, authError in
+        if success {
+          continuation.resume(returning: context)
+        } else {
+          continuation.resume(throwing: Exception(
+            name: "AuthenticationFailed",
+            description: authError?.localizedDescription ?? "Authentication failed"
+          ))
+        }
+      }
+    }
   }
 }

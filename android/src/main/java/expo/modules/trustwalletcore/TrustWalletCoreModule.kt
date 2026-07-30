@@ -1,17 +1,16 @@
 package expo.modules.trustwalletcore
 
-import com.google.protobuf.ByteString
+import androidx.fragment.app.FragmentActivity
+import expo.modules.kotlin.exception.CodedException
+import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import wallet.core.java.AnySigner
-import wallet.core.jni.CoinType
 import wallet.core.jni.HDWallet
-import wallet.core.jni.PrivateKey
-import wallet.core.jni.proto.Common
-import wallet.core.jni.proto.Ethereum
-import wallet.core.jni.proto.Solana
-import java.math.BigInteger
+import java.util.UUID
 
+// Mnemonic/private-key material never crosses back to JS except `exportMnemonic` — an
+// explicit, biometric/device-credential-gated backup flow. Every other method returns only
+// walletIds, addresses, or signed transaction bytes/hex.
 class TrustWalletCoreModule : Module() {
   companion object {
     init {
@@ -20,124 +19,74 @@ class TrustWalletCoreModule : Module() {
     }
   }
 
+  private val context get() = appContext.reactContext
+    ?: throw CodedException("NoContext", "React context unavailable", null)
+
+  private val activity: FragmentActivity
+    get() = appContext.currentActivity as? FragmentActivity
+      ?: throw CodedException("NoActivity", "No foreground FragmentActivity to host the biometric prompt", null)
+
   override fun definition() = ModuleDefinition {
     Name("TrustWalletCore")
 
-    // Returns { mnemonic } — strength 128 = 12 words, 256 = 24 words
-    AsyncFunction("generateWallet") { strength: Int, passphrase: String ->
-      mapOf("mnemonic" to HDWallet(strength, passphrase).mnemonic())
+    // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses }.
+    AsyncFunction("createWallet") Coroutine { strength: Int, passphrase: String ->
+      val wallet = HDWallet(strength, passphrase)
+      persistNewWallet(wallet)
     }
 
-    // Validates mnemonic and returns { mnemonic }
-    AsyncFunction("restoreWallet") { mnemonic: String, passphrase: String ->
-      HDWallet(mnemonic, passphrase) // throws on invalid mnemonic
-      mapOf("mnemonic" to mnemonic)
+    // One-time mnemonic exposure from JS, at import only — never retained after this call.
+    // Returns { walletId, addresses }.
+    AsyncFunction("importWallet") Coroutine { mnemonic: String, passphrase: String ->
+      val wallet = HDWallet(mnemonic, passphrase) // throws on invalid mnemonic
+      persistNewWallet(wallet)
     }
 
-    // Derives address and private key for a named coin
-    // coin: "ethereum" | "solana"
-    AsyncFunction("getAddressForCoin") { mnemonic: String, coin: String, passphrase: String ->
-      val wallet = HDWallet(mnemonic, passphrase)
-      val coinType = resolveCoinType(coin)
-      mapOf(
-        "address"    to wallet.getAddressForCoin(coinType),
-        "privateKey" to wallet.getKeyForCoin(coinType).data().toHex(),
-      )
-    }
-
-    // Signs an Ethereum transaction; returns 0x-prefixed RLP-encoded signed tx hex
-    // txParams: { to, valueHex, nonce, gasLimitHex, chainId, dataHex?,
-    //             gasPriceHex? (legacy) | maxFeePerGasHex + maxPriorityFeePerGasHex (EIP-1559) }
-    AsyncFunction("signEthereumTransaction") { privateKeyHex: String, txParams: Map<String, Any> ->
-      val privateKey = PrivateKey(privateKeyHex.hexToBytes())
-      val to        = txParams["to"] as String
-      val valueHex  = (txParams["valueHex"] as? String)?.ifEmpty { "0" } ?: "0"
-      val nonce     = (txParams["nonce"] as Number).toInt()
-      val gasLimHex = txParams["gasLimitHex"] as String
-      val chainId   = (txParams["chainId"] as Number).toInt()
-      val dataHex   = (txParams["dataHex"] as? String) ?: ""
-
-      val input = Ethereum.SigningInput.newBuilder().apply {
-        this.chainId    = BigInteger.valueOf(chainId.toLong()).toMinimalByteString()
-        this.nonce      = BigInteger.valueOf(nonce.toLong()).toMinimalByteString()
-        this.gasLimit   = BigInteger(gasLimHex, 16).toMinimalByteString()
-        this.toAddress  = to
-        this.privateKey = ByteString.copyFrom(privateKey.data())
-
-        this.transaction = Ethereum.Transaction.newBuilder().apply {
-          this.transfer = Ethereum.Transaction.Transfer.newBuilder().apply {
-            this.amount = BigInteger(valueHex, 16).toMinimalByteString()
-            if (dataHex.isNotEmpty()) this.data = ByteString.copyFrom(dataHex.hexToBytes())
-          }.build()
-        }.build()
-
-        val gasPriceHex = txParams["gasPriceHex"] as? String
-        if (gasPriceHex != null) {
-          this.gasPrice = BigInteger(gasPriceHex, 16).toMinimalByteString()
-        } else {
-          val mfHex = txParams["maxFeePerGasHex"] as? String
-          val pfHex = txParams["maxPriorityFeePerGasHex"] as? String
-          if (mfHex != null && pfHex != null) {
-            this.maxFeePerGas          = BigInteger(mfHex, 16).toMinimalByteString()
-            this.maxInclusionFeePerGas = BigInteger(pfHex, 16).toMinimalByteString()
-          }
-        }
-      }.build()
-
-      val output = AnySigner.sign(input, CoinType.ETHEREUM, Ethereum.SigningOutput.parser())
-      if (output.error != Common.SigningError.OK) {
-        throw Exception("Signing failed: ${output.errorMessage}")
+    // Reads only the ungated metadata store — no biometric prompt.
+    AsyncFunction("listWallets") {
+      NativeWalletStore.loadMetadata(context).map { (walletId, addresses) ->
+        mapOf("walletId" to walletId, "addresses" to addresses)
       }
-      "0x" + output.encoded.toByteArray().toHex()
     }
 
-    // Signs a Solana transfer; returns base64-encoded signed transaction
-    // txParams: { to, lamports (string, lamports amount), recentBlockhash }
-    AsyncFunction("signSolanaTransaction") { privateKeyHex: String, txParams: Map<String, Any> ->
-      val privateKey      = PrivateKey(privateKeyHex.hexToBytes())
-      val to              = txParams["to"] as String
-      val lamports        = (txParams["lamports"] as String).toLong()
-      val recentBlockhash = txParams["recentBlockhash"] as String
+    AsyncFunction("deleteWallet") { walletId: String ->
+      NativeWalletStore.deleteMnemonic(context, walletId)
+      val metadata = NativeWalletStore.loadMetadata(context).toMutableMap()
+      metadata.remove(walletId)
+      NativeWalletStore.saveMetadata(context, metadata)
+    }
 
-      val input = Solana.SigningInput.newBuilder().apply {
-        this.recentBlockhash = recentBlockhash
-        this.privateKey      = ByteString.copyFrom(privateKey.data())
-        this.transferTransaction = Solana.Transfer.newBuilder().apply {
-          this.recipient = to
-          this.value     = lamports
-        }.build()
-      }.build()
+    // Triggers the native biometry/device-credential prompt, then signs entirely in-process.
+    // Returns { signedTx, meta? }.
+    AsyncFunction("signTransaction") Coroutine { walletId: String, chain: String, unsignedTx: Map<String, Any> ->
+      val chainKey = ChainKey.fromJs(chain)
+      val cipher = NativeWalletStore.authenticate(activity, NativeWalletStore.decryptCipher(context, walletId), "Sign transaction")
+      val mnemonic = NativeWalletStore.loadMnemonic(context, walletId, cipher)
+      val wallet = HDWallet(mnemonic, "")
+      val result = ChainSigner.sign(chainKey, wallet, unsignedTx)
+      val response = mutableMapOf<String, Any>("signedTx" to result.signedTx)
+      result.meta?.let { response["meta"] = it }
+      response
+    }
 
-      val output = AnySigner.sign(input, CoinType.SOLANA, Solana.SigningOutput.parser())
-      if (output.error != Common.SigningError.OK) {
-        throw Exception("Signing failed: ${output.errorMessage}")
-      }
-      output.encoded
+    // The one sanctioned mnemonic exposure — explicit backup flow only.
+    AsyncFunction("exportMnemonic") Coroutine { walletId: String ->
+      val cipher = NativeWalletStore.authenticate(activity, NativeWalletStore.decryptCipher(context, walletId), "Reveal recovery phrase")
+      NativeWalletStore.loadMnemonic(context, walletId, cipher)
     }
   }
-}
 
-// Helpers
-private fun resolveCoinType(coin: String): CoinType = when (coin.lowercase()) {
-  "ethereum" -> CoinType.ETHEREUM
-  "solana"   -> CoinType.SOLANA
-  "bnb"      -> CoinType.SMARTCHAIN
-  else       -> throw IllegalArgumentException("Unsupported coin: $coin")
-}
+  private suspend fun persistNewWallet(wallet: HDWallet): Map<String, Any> {
+    val walletId = UUID.randomUUID().toString()
+    val addresses = ChainKey.entries.associate { chain -> chain.name.lowercase() to wallet.getAddressForCoin(chain.coinType) }
 
-private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+    val cipher = NativeWalletStore.authenticate(activity, NativeWalletStore.encryptCipher(walletId), "Secure your new wallet")
+    NativeWalletStore.saveMnemonic(context, walletId, wallet.mnemonic(), cipher)
 
-private fun String.hexToBytes(): ByteArray {
-  val s = removePrefix("0x").let { if (it.length % 2 == 0) it else "0$it" }
-  return ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
-}
+    val metadata = NativeWalletStore.loadMetadata(context).toMutableMap()
+    metadata[walletId] = addresses
+    NativeWalletStore.saveMetadata(context, metadata)
 
-// BigInteger → minimal big-endian ByteString (strips Java's leading sign byte)
-private fun BigInteger.toMinimalByteString(): ByteString {
-  val raw = toByteArray()
-  return if (raw.size > 1 && raw[0] == 0.toByte()) {
-    ByteString.copyFrom(raw, 1, raw.size - 1)
-  } else {
-    ByteString.copyFrom(raw)
+    return mapOf("walletId" to walletId, "addresses" to addresses)
   }
 }
