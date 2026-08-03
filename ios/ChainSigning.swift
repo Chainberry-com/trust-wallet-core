@@ -1,3 +1,4 @@
+import Foundation
 import ExpoModulesCore
 import WalletCore
 
@@ -67,11 +68,13 @@ enum ChainSigner {
 
   private static func signEvm(wallet: HDWallet, coin: CoinType, txParams: [String: Any]) throws -> String {
     guard let to = txParams["to"] as? String,
-          let nonce = txParams["nonce"] as? Int,
+          let nonceNum = txParams["nonce"] as? NSNumber,
           let gasLimHex = txParams["gasLimitHex"] as? String,
-          let chainId = txParams["chainId"] as? Int else {
+          let chainIdNum = txParams["chainId"] as? NSNumber else {
       throw Exception(name: "InvalidParams", description: "Missing required EVM tx params")
     }
+    let nonce = nonceNum.intValue
+    let chainId = chainIdNum.intValue
     let valueHex = (txParams["valueHex"] as? String) ?? "0"
     let dataHex = (txParams["dataHex"] as? String) ?? ""
 
@@ -83,10 +86,9 @@ enum ChainSigner {
     input.gasLimit = hexData(gasLimHex) ?? Data()
     input.toAddress = to
     input.privateKey = privateKey.data
-    if !dataHex.isEmpty { input.txData = hexData(dataHex) ?? Data() }
-
     var transfer = EthereumTransaction.Transfer()
     transfer.amount = hexData(valueHex) ?? Data([0])
+    if !dataHex.isEmpty { transfer.data = hexData(dataHex) ?? Data() }
     var tx = EthereumTransaction()
     tx.transfer = transfer
     input.transaction = tx
@@ -95,6 +97,7 @@ enum ChainSigner {
       input.gasPrice = hexData(gasPriceHex) ?? Data()
     } else if let mfHex = txParams["maxFeePerGasHex"] as? String,
               let pfHex = txParams["maxPriorityFeePerGasHex"] as? String {
+      input.txMode = .enveloped
       input.maxFeePerGas = hexData(mfHex) ?? Data()
       input.maxInclusionFeePerGas = hexData(pfHex) ?? Data()
     }
@@ -122,15 +125,24 @@ enum ChainSigner {
     }
     let privateKey = wallet.getKeyForCoin(coin: .solana)
 
-    var raw = SolanaRawMessage()
-    raw.type = .legacy
-    raw.encoded = txData
+    // Decode the unsigned tx to extract the embedded recentBlockhash, then re-sign via
+    // TW's sanctioned path. We pass the same blockhash back (no-op refresh) so the
+    // tx content is unchanged — only the signature is added.
+    let decodedData = TransactionDecoder.decode(coinType: .solana, encodedTx: txData)
+    let decoded = try SolanaDecodingTransactionOutput(serializedData: decodedData)
+    guard decoded.error == .ok else {
+      throw Exception(name: "DecodingFailed", description: "Failed to decode SOL tx: \(decoded.errorMessage)")
+    }
+    let recentBlockhash = decoded.transaction.legacy.recentBlockhash
 
-    var input = SolanaSigningInput()
-    input.privateKey = privateKey.data
-    input.rawMessage = raw
-
-    let output: SolanaSigningOutput = AnySigner.sign(input: input, coin: .solana)
+    let privateKeys = DataVector()
+    privateKeys.add(data: privateKey.data)
+    guard let outputData = SolanaTransaction.updateBlockhashAndSign(
+      encodedTx: unsignedTxBase64, recentBlockhash: recentBlockhash, privateKeys: privateKeys
+    ) else {
+      throw Exception(name: "SigningFailed", description: "SolanaTransaction.updateBlockhashAndSign returned nil")
+    }
+    let output = try SolanaSigningOutput(serializedData: outputData)
     guard output.error == .ok else {
       throw Exception(name: "SigningFailed", description: output.errorMessage)
     }
@@ -148,7 +160,7 @@ enum ChainSigner {
     guard let toAddress = txParams["toAddress"] as? String,
           let changeAddress = txParams["changeAddress"] as? String,
           let sendAmountSats = (txParams["sendAmountSats"] as? String).flatMap(Int64.init),
-          let satsPerByte = txParams["satsPerByte"] as? Double,
+          let satsPerByteNum = txParams["satsPerByte"] as? NSNumber,
           let inputs = txParams["inputs"] as? [[String: Any]] else {
       throw Exception(name: "InvalidParams", description: "Missing required UTXO tx params")
     }
@@ -158,7 +170,7 @@ enum ChainSigner {
     var input = BitcoinSigningInput()
     input.hashType = 1 // SIGHASH_ALL — stable Bitcoin protocol constant, not a wallet-core-specific value
     input.amount = sendAmountSats
-    input.byteFee = Int64(satsPerByte.rounded(.up))
+    input.byteFee = Int64(satsPerByteNum.doubleValue.rounded(.up))
     input.toAddress = toAddress
     input.changeAddress = changeAddress
     input.useMaxAmount = false
@@ -167,7 +179,7 @@ enum ChainSigner {
 
     input.utxo = try inputs.map { entry in
       guard let txIdHex = entry["txIdHex"] as? String,
-            let vout = entry["vout"] as? Int,
+            let voutNum = entry["vout"] as? NSNumber,
             let amount = (entry["amountSats"] as? String).flatMap(Int64.init),
             let scriptHex = entry["scriptPubKeyHex"] as? String,
             let scriptData = hexData(scriptHex),
@@ -180,7 +192,7 @@ enum ChainSigner {
 
       var outPoint = BitcoinOutPoint()
       outPoint.hash = txIdData
-      outPoint.index = UInt32(vout)
+      outPoint.index = UInt32(voutNum.intValue)
 
       var utxo = BitcoinUnspentTransaction()
       utxo.outPoint = outPoint
@@ -204,44 +216,22 @@ enum ChainSigner {
   // contract type only (matches prepareTrxTransaction's non-token branch); the TRC20
   // (triggerSmartContract) branch is not mapped here and needs its own contract-call SigningInput.
   private static func signTron(wallet: HDWallet, txParams: [String: Any]) throws -> String {
-    guard let rawData = txParams["raw_data"] as? [String: Any],
-          let contracts = rawData["contract"] as? [[String: Any]],
-          let firstContract = contracts.first,
-          let parameter = firstContract["parameter"] as? [String: Any],
-          let value = parameter["value"] as? [String: Any],
-          let toAddressHex = value["to_address"] as? String,
-          let amount = value["amount"] as? Int,
-          let refBlockBytes = rawData["ref_block_bytes"] as? String,
-          let refBlockHash = rawData["ref_block_hash"] as? String,
-          let expiration = rawData["expiration"] as? Int,
-          let timestamp = rawData["timestamp"] as? Int else {
-      throw Exception(name: "InvalidParams", description: "Missing/unrecognized TRX unsigned tx shape")
-    }
     let privateKey = wallet.getKeyForCoin(coin: .tron)
 
-    // TronGrid's raw_data.contract[].parameter.value.to_address is raw hex (0x41-prefixed
-    // 21-byte address), not the base58check "T..." string wallet-core's TronTransfer.toAddress
-    // expects — convert via the coin-agnostic AnyAddress helper.
-    guard let toAddressData = ChainSigner.hexData(toAddressHex),
-          let toAddress = AnyAddress(data: toAddressData, coin: .tron)?.description else {
-      throw Exception(name: "InvalidParams", description: "Invalid TRX to_address")
+    // Pass the full TronGrid unsigned tx JSON via rawJson — wallet-core's direct-sign path
+    // reads txID from the JSON and signs that digest, returning the complete signed tx in output.json.
+    // This covers both plain TRX transfers and TRC20 triggerSmartContract payloads.
+    guard JSONSerialization.isValidJSONObject(txParams) else {
+      throw Exception(name: "InvalidParams", description: "TRX tx is not JSON-serializable")
     }
-
-    var transfer = TronTransfer()
-    transfer.toAddress = toAddress
-    transfer.amount = Int64(amount)
-
-    var contract = TronTransaction()
-    contract.transfer = transfer
+    let jsonData = try JSONSerialization.data(withJSONObject: txParams)
+    guard let jsonStr = String(data: jsonData, encoding: .utf8) else {
+      throw Exception(name: "InvalidParams", description: "TRX tx JSON encoding failed")
+    }
 
     var input = TronSigningInput()
     input.privateKey = privateKey.data
-    input.transaction = contract
-    input.txID = "" // computed by the signer
-    input.refBlockBytes = hexData(refBlockBytes) ?? Data()
-    input.refBlockHash = hexData(refBlockHash) ?? Data()
-    input.expiration = Int64(expiration)
-    input.timestamp = Int64(timestamp)
+    input.rawJson = jsonStr
 
     let output: TronSigningOutput = AnySigner.sign(input: input, coin: .tron)
     guard output.error == .ok else {
@@ -259,18 +249,19 @@ enum ChainSigner {
           let destination = txParams["Destination"] as? String,
           let amountDrops = txParams["Amount"] as? String,
           let feeDrops = txParams["Fee"] as? String,
-          let sequence = txParams["Sequence"] as? Int else {
+          let sequenceNum = txParams["Sequence"] as? NSNumber else {
       throw Exception(name: "InvalidParams", description: "Missing required XRP Payment fields")
     }
-    let lastLedgerSequence = txParams["LastLedgerSequence"] as? Int
-    let destinationTag = txParams["DestinationTag"] as? Int
+    let sequence = sequenceNum.intValue
+    let lastLedgerSequence = (txParams["LastLedgerSequence"] as? NSNumber)?.intValue
+    let destinationTag = (txParams["DestinationTag"] as? NSNumber)?.intValue
 
     let privateKey = wallet.getKeyForCoin(coin: .xrp)
 
     var payment = RippleOperationPayment()
     payment.amount = Int64(amountDrops) ?? 0
     payment.destination = destination
-    if let tag = destinationTag { payment.destinationTag = UInt32(tag) }
+    if let tag = destinationTag { payment.destinationTag = UInt64(tag) }
 
     var input = RippleSigningInput()
     input.privateKey = privateKey.data
@@ -297,17 +288,23 @@ enum ChainSigner {
   private static func signTon(wallet: HDWallet, txParams: [String: Any]) throws -> ChainSigner.Result {
     guard let toAddress = txParams["toAddress"] as? String,
           let amountStr = txParams["amount"] as? String,
-          let seqno = txParams["seqno"] as? Int else {
+          let seqnoNum = txParams["seqno"] as? NSNumber else {
       throw Exception(name: "InvalidParams", description: "Missing required TON tx params")
     }
+    let seqno = seqnoNum.intValue
     let memoId = txParams["memoId"] as? String
 
     let privateKey = wallet.getKeyForCoin(coin: .ton)
 
+    // amount is Data (uint128 big-endian); encode the nanoton UInt64 as 8 big-endian bytes.
+    let nanotons = UInt64(amountStr) ?? 0
+    var bigEndianNano = nanotons.bigEndian
+    let amountData = withUnsafeBytes(of: &bigEndianNano) { Data($0) }
+
     var transfer = TheOpenNetworkTransfer()
     transfer.dest = toAddress
-    transfer.amount = UInt64(amountStr) ?? 0
-    transfer.mode = UInt32(TheOpenNetworkSendMode.payGasSeparately.rawValue | TheOpenNetworkSendMode.ignoreActionPhaseErrors.rawValue)
+    transfer.amount = amountData
+    transfer.mode = UInt32(TheOpenNetworkSendMode.payFeesSeparately.rawValue | TheOpenNetworkSendMode.ignoreActionPhaseErrors.rawValue)
     transfer.bounceable = true
     if let memoId { transfer.comment = memoId }
 
@@ -315,7 +312,8 @@ enum ChainSigner {
     input.privateKey = privateKey.data
     input.walletVersion = .walletV4R2
     input.sequenceNumber = UInt32(seqno)
-    input.transfer = transfer
+    input.expireAt = UInt32(Date().timeIntervalSince1970) + 600
+    input.messages = [transfer]
 
     let output: TheOpenNetworkSigningOutput = AnySigner.sign(input: input, coin: .ton)
     guard output.error == .ok else {
