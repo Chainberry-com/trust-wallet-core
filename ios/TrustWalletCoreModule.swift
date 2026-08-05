@@ -1,6 +1,6 @@
 import ExpoModulesCore
 import WalletCore
-import LocalAuthentication
+@preconcurrency import LocalAuthentication
 
 // Mnemonic/private-key material never crosses back to JS except `exportMnemonic` — an
 // explicit, biometric/passcode-gated backup flow. Every other method returns only
@@ -11,7 +11,7 @@ public class TrustWalletCoreModule: Module {
 
     // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses }.
     AsyncFunction("createWallet") { (strength: Int, passphrase: String) throws -> [String: Any] in
-      guard let wallet = HDWallet(strength: UInt32(strength), passphrase: passphrase) else {
+      guard let wallet = HDWallet(strength: Int32(strength), passphrase: passphrase) else {
         throw Exception(name: "WalletError", description: "Failed to generate wallet")
       }
       return try Self.persistNewWallet(wallet: wallet)
@@ -42,7 +42,7 @@ public class TrustWalletCoreModule: Module {
 
     // Triggers the native biometry/passcode prompt, then signs entirely in-process.
     // Returns { signedTx, meta? }.
-    AsyncFunction("signTransaction") { (walletId: String, chain: String, unsignedTx: [String: Any]) throws -> [String: Any] in
+    AsyncFunction("signTransaction") { (walletId: String, chain: String, unsignedTx: [String: Any]) async throws -> [String: Any] in
       let chainKey = try ChainKey(fromJs: chain)
       let context = try await Self.authenticatedContext(reason: "Sign transaction")
       let mnemonic = try NativeWalletStore.loadMnemonic(walletId: walletId, context: context)
@@ -56,7 +56,7 @@ public class TrustWalletCoreModule: Module {
     }
 
     // The one sanctioned mnemonic exposure — explicit backup flow only.
-    AsyncFunction("exportMnemonic") { (walletId: String) throws -> String in
+    AsyncFunction("exportMnemonic") { (walletId: String) async throws -> String in
       let context = try await Self.authenticatedContext(reason: "Reveal recovery phrase")
       return try NativeWalletStore.loadMnemonic(walletId: walletId, context: context)
     }

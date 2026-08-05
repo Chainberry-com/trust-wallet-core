@@ -1,7 +1,8 @@
 {
   "platforms": ["ios", "android"],
   "ios": {
-    "modules": ["TrustWalletCoreModule"]
+    "modules": ["TrustWalletCoreModule"],
+    "podspecPath": "TrustWalletCoreModule.podspec"
   },
   "android": {
     "modules": ["expo.modules.trustwalletcore.TrustWalletCoreModule"]
