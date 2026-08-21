@@ -6,12 +6,16 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import expo.modules.kotlin.exception.CodedException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
 import java.security.KeyStore
+import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -21,14 +25,45 @@ import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 
 /**
+ * `.NotFound` and `.Corrupted` are deliberately distinct: `.NotFound` means "there is
+ * legitimately nothing here yet" (no metadata has ever been written, or a wallet id has no
+ * matching file) and is safe to treat as an empty/absent result. `.Corrupted` means
+ * "something is here but it isn't what we expect" (malformed JSON) and must never be
+ * silently treated as absent — doing so is exactly how a transient read failure can cause
+ * `createWallet` to stomp a real, unreadable index with a fresh one.
+ *
+ * Extends `CodedException` directly (rather than a flat `Exception`) so `.code` survives the
+ * Expo bridge losslessly with no extra wrapping step.
+ */
+sealed class NativeWalletStoreError private constructor(code: String, message: String, cause: Throwable? = null) :
+  CodedException(code, message, cause) {
+
+  class NotFound(walletId: String) :
+    NativeWalletStoreError("ERR_WALLET_NOT_FOUND", "Wallet not found: $walletId")
+
+  class Corrupted(detail: String, cause: Throwable? = null) :
+    NativeWalletStoreError("ERR_WALLET_DATA_CORRUPTED", "Wallet data is corrupted: $detail", cause)
+
+  class PermissionDenied(detail: String, cause: Throwable? = null) :
+    NativeWalletStoreError("ERR_WALLET_PERMISSION_DENIED", "Permission denied: $detail", cause)
+
+  class DeleteFailed(walletId: String, cause: Throwable? = null) :
+    NativeWalletStoreError("ERR_WALLET_DELETE_FAILED", "Failed to delete wallet: $walletId", cause)
+
+  class InvalidWalletId(walletId: String) :
+    NativeWalletStoreError("ERR_INVALID_WALLET_ID", "Invalid wallet id: $walletId")
+
+  class AuthenticationFailed(detail: String) :
+    NativeWalletStoreError("ERR_AUTHENTICATION_FAILED", "Authentication failed: $detail")
+}
+
+/**
  * Persists mnemonics as files encrypted with a hardware-backed, biometry-or-device-credential
  * gated Android Keystore AES key (one key per wallet), plus a parallel ungated metadata store
  * (walletId -> per-chain addresses) for read-only UI. Deliberately not `EncryptedSharedPreferences`
  * or wallet-core's `StoredKey` keystore-JSON — confidentiality comes entirely from the Keystore
  * key never leaving the TEE/StrongBox, not from the on-disk file encoding.
  */
-class NativeWalletStoreError(message: String) : Exception(message)
-
 object NativeWalletStore {
   private const val KEY_ALIAS_PREFIX = "vault_wallet_"
   private const val ANDROID_KEYSTORE = "AndroidKeyStore"
@@ -46,6 +81,18 @@ object NativeWalletStore {
 
   private fun metadataFile(context: Context): File =
     File(walletsDir(context), METADATA_FILE)
+
+  /** Wallet ids are always internally generated as UUIDs (`UUID.randomUUID().toString()`).
+   * Any caller-supplied id is validated against that format before it's used to build a file
+   * path or Keystore alias, rejecting malformed/adversarial input (e.g. path traversal) up front. */
+  fun validateWalletId(walletId: String): String {
+    try {
+      UUID.fromString(walletId)
+    } catch (e: IllegalArgumentException) {
+      throw NativeWalletStoreError.InvalidWalletId(walletId)
+    }
+    return walletId
+  }
 
   // MARK: - Keystore key management
 
@@ -89,15 +136,32 @@ object NativeWalletStore {
 
   fun loadMnemonic(context: Context, walletId: String, authenticatedCipher: Cipher): String {
     val file = mnemonicFile(context, walletId)
-    if (!file.exists()) throw NativeWalletStoreError("Wallet not found: $walletId")
+    if (!file.exists()) throw NativeWalletStoreError.NotFound(walletId)
     val bytes = file.readBytes()
     val ciphertext = bytes.copyOfRange(GCM_IV_LENGTH, bytes.size)
     return String(authenticatedCipher.doFinal(ciphertext), Charsets.UTF_8)
   }
 
+  /** Idempotent: deleting a wallet id whose file is already gone is a no-op, matching normal
+   * `deleteWallet` semantics. The delete result is checked and propagates on failure rather
+   * than being silently discarded. Pure/`File`-based (no `Context`) so it's unit-testable on
+   * the plain JVM without an Android `Context`/Keystore, unlike [deleteMnemonic] as a whole. */
+  internal fun deleteFileChecked(file: File, walletId: String) {
+    if (file.exists() && !file.delete()) {
+      throw NativeWalletStoreError.DeleteFailed(walletId)
+    }
+  }
+
+  /** Idempotent: deleting a wallet id whose file is already gone is a no-op, matching normal
+   * `deleteWallet` semantics. Both the file deletion and the Keystore-entry deletion results
+   * are checked and propagate on failure — neither is silently discarded. */
   fun deleteMnemonic(context: Context, walletId: String) {
-    mnemonicFile(context, walletId).delete()
-    runCatching { keyStore().deleteEntry(KEY_ALIAS_PREFIX + walletId) }
+    deleteFileChecked(mnemonicFile(context, walletId), walletId)
+    try {
+      keyStore().deleteEntry(KEY_ALIAS_PREFIX + walletId)
+    } catch (e: Exception) {
+      throw NativeWalletStoreError.DeleteFailed(walletId, e)
+    }
   }
 
   /** A `Cipher` initialized for encryption, to be unlocked via [authenticate] before use. */
@@ -111,7 +175,7 @@ object NativeWalletStore {
    * [authenticate] before use. */
   fun decryptCipher(context: Context, walletId: String): Cipher {
     val file = mnemonicFile(context, walletId)
-    if (!file.exists()) throw NativeWalletStoreError("Wallet not found: $walletId")
+    if (!file.exists()) throw NativeWalletStoreError.NotFound(walletId)
     val iv = file.readBytes().copyOfRange(0, GCM_IV_LENGTH)
     val cipher = Cipher.getInstance(TRANSFORMATION)
     cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(walletId), GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
@@ -120,18 +184,40 @@ object NativeWalletStore {
 
   // MARK: - Metadata (ungated: walletId -> { chain: address })
 
-  fun saveMetadata(context: Context, wallets: Map<String, Map<String, String>>) {
+  /** Atomically replaces [target] via a temp-file write + `File.renameTo` (an atomic
+   * `rename(2)` on the same filesystem/mount, since the temp file is created alongside
+   * [target] in the same directory) — never a direct in-place overwrite, which could leave a
+   * torn file if the process is killed mid-write. Pure/`File`-based so it's unit-testable on
+   * the plain JVM without an Android `Context`. */
+  internal fun saveMetadataToFile(target: File, wallets: Map<String, Map<String, String>>) {
     val root = JSONObject()
     for ((walletId, addresses) in wallets) {
       root.put(walletId, JSONObject(addresses as Map<*, *>))
     }
-    metadataFile(context).writeText(root.toString())
+    val temp = File(target.parentFile, "$METADATA_FILE.tmp-${System.nanoTime()}")
+    try {
+      temp.writeText(root.toString())
+    } catch (e: Exception) {
+      temp.delete()
+      throw NativeWalletStoreError.PermissionDenied("could not write metadata temp file", e)
+    }
+    if (!temp.renameTo(target)) {
+      temp.delete()
+      throw NativeWalletStoreError.Corrupted("failed to atomically replace metadata file")
+    }
   }
 
-  fun loadMetadata(context: Context): Map<String, Map<String, String>> {
-    val file = metadataFile(context)
+  /** Distinguishes "no metadata has ever been written" (legitimately empty) from a genuine
+   * parse/corruption failure, which now throws a typed [NativeWalletStoreError.Corrupted]
+   * instead of letting a raw, uncaught `JSONException` leak through the Expo bridge.
+   * Pure/`File`-based so it's unit-testable on the plain JVM without an Android `Context`. */
+  internal fun loadMetadataFromFile(file: File): Map<String, Map<String, String>> {
     if (!file.exists()) return emptyMap()
-    val root = JSONObject(file.readText())
+    val root = try {
+      JSONObject(file.readText())
+    } catch (e: JSONException) {
+      throw NativeWalletStoreError.Corrupted("metadata.json is not valid JSON", e)
+    }
     val result = mutableMapOf<String, Map<String, String>>()
     for (walletId in root.keys()) {
       val addressesJson = root.getJSONObject(walletId)
@@ -144,6 +230,14 @@ object NativeWalletStore {
     return result
   }
 
+  fun saveMetadata(context: Context, wallets: Map<String, Map<String, String>>) {
+    saveMetadataToFile(metadataFile(context), wallets)
+  }
+
+  fun loadMetadata(context: Context): Map<String, Map<String, String>> {
+    return loadMetadataFromFile(metadataFile(context))
+  }
+
   // MARK: - Biometric/device-credential prompt
 
   /** Authenticates the given [Cipher] via BiometricPrompt (biometry-or-device-credential),
@@ -154,36 +248,77 @@ object NativeWalletStore {
   suspend fun authenticate(activity: FragmentActivity, cipher: Cipher, title: String): Cipher =
     withContext(Dispatchers.Main) {
       suspendCoroutine { continuation ->
-        val allowedAuthenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG or
-          BiometricManager.Authenticators.DEVICE_CREDENTIAL
-
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
-          .setTitle(title)
-          .setAllowedAuthenticators(allowedAuthenticators)
-          .build()
-
-        val executor = androidx.core.content.ContextCompat.getMainExecutor(activity)
-        val prompt = BiometricPrompt(
+        val prompt = biometricPrompt(
           activity,
-          executor,
-          object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-              val authenticatedCipher = result.cryptoObject?.cipher
-                ?: return continuation.resumeWithException(NativeWalletStoreError("No authenticated cipher returned"))
+          onSucceeded = { result ->
+            val authenticatedCipher = result.cryptoObject?.cipher
+            if (authenticatedCipher == null) {
+              continuation.resumeWithException(
+                NativeWalletStoreError.AuthenticationFailed("no authenticated cipher returned")
+              )
+            } else {
               continuation.resume(authenticatedCipher)
             }
-
-            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-              continuation.resumeWithException(NativeWalletStoreError("Authentication error: $errString"))
-            }
-
-            override fun onAuthenticationFailed() {
-              // Not terminal — BiometricPrompt keeps the sheet open for retry; only
-              // onAuthenticationError/onAuthenticationSucceeded resolve the continuation.
-            }
+          },
+          onError = { errString ->
+            continuation.resumeWithException(NativeWalletStoreError.AuthenticationFailed(errString))
           }
         )
-        prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))
+        prompt.authenticate(promptInfo(title), BiometricPrompt.CryptoObject(cipher))
       }
     }
+
+  /** Crypto-object-less confirmation prompt — for gating operations like `deleteWallet` that
+   * don't perform a Keystore encrypt/decrypt themselves, so there's no `Cipher` to bind the
+   * prompt to (and binding to one would wrongly fail when e.g. cleaning up a wallet whose key
+   * is already broken/missing). Same main-thread requirement as [authenticate]. */
+  suspend fun confirmIdentity(activity: FragmentActivity, title: String) {
+    withContext(Dispatchers.Main) {
+      suspendCoroutine<Unit> { continuation ->
+        val prompt = biometricPrompt(
+          activity,
+          onSucceeded = { continuation.resume(Unit) },
+          onError = { errString ->
+            continuation.resumeWithException(NativeWalletStoreError.AuthenticationFailed(errString))
+          }
+        )
+        prompt.authenticate(promptInfo(title))
+      }
+    }
+  }
+
+  private fun promptInfo(title: String): BiometricPrompt.PromptInfo {
+    val allowedAuthenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG or
+      BiometricManager.Authenticators.DEVICE_CREDENTIAL
+    return BiometricPrompt.PromptInfo.Builder()
+      .setTitle(title)
+      .setAllowedAuthenticators(allowedAuthenticators)
+      .build()
+  }
+
+  private fun biometricPrompt(
+    activity: FragmentActivity,
+    onSucceeded: (BiometricPrompt.AuthenticationResult) -> Unit,
+    onError: (String) -> Unit,
+  ): BiometricPrompt {
+    val executor = ContextCompat.getMainExecutor(activity)
+    return BiometricPrompt(
+      activity,
+      executor,
+      object : BiometricPrompt.AuthenticationCallback() {
+        override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+          onSucceeded(result)
+        }
+
+        override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+          onError(errString.toString())
+        }
+
+        override fun onAuthenticationFailed() {
+          // Not terminal — BiometricPrompt keeps the sheet open for retry; only
+          // onAuthenticationError/onAuthenticationSucceeded resolve the continuation.
+        }
+      }
+    )
+  }
 }

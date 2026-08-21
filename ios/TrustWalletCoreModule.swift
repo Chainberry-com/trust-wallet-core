@@ -14,7 +14,11 @@ public class TrustWalletCoreModule: Module {
       guard let wallet = HDWallet(strength: Int32(strength), passphrase: passphrase) else {
         throw Exception(name: "WalletError", description: "Failed to generate wallet")
       }
-      return try Self.persistNewWallet(wallet: wallet)
+      do {
+        return try Self.persistNewWallet(wallet: wallet)
+      } catch let e as NativeWalletStoreError {
+        throw e.asException
+      }
     }
 
     // One-time mnemonic exposure from JS, at import only — never retained after this call.
@@ -23,42 +27,70 @@ public class TrustWalletCoreModule: Module {
       guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: passphrase) else {
         throw Exception(name: "InvalidMnemonic", description: "Invalid mnemonic phrase")
       }
-      return try Self.persistNewWallet(wallet: wallet)
-    }
-
-    // Reads only the ungated metadata store — no biometric prompt.
-    AsyncFunction("listWallets") { () -> [[String: Any]] in
-      NativeWalletStore.loadMetadata().map { walletId, addresses in
-        ["walletId": walletId, "addresses": addresses]
+      do {
+        return try Self.persistNewWallet(wallet: wallet)
+      } catch let e as NativeWalletStoreError {
+        throw e.asException
       }
     }
 
-    AsyncFunction("deleteWallet") { (walletId: String) throws -> Void in
-      NativeWalletStore.deleteMnemonic(walletId: walletId)
-      var metadata = NativeWalletStore.loadMetadata()
-      metadata.removeValue(forKey: walletId)
-      try NativeWalletStore.saveMetadata(metadata)
+    // Reads only the ungated metadata store — no biometric prompt.
+    AsyncFunction("listWallets") { () throws -> [[String: Any]] in
+      do {
+        return try NativeWalletStore.loadMetadata().map { walletId, addresses in
+          ["walletId": walletId, "addresses": addresses]
+        }
+      } catch let e as NativeWalletStoreError {
+        throw e.asException
+      }
+    }
+
+    // Irreversible — requires a fresh biometric/passcode confirmation before anything is
+    // deleted, same gate as `signTransaction`/`exportMnemonic`. A compromised/malicious JS
+    // caller can still invoke this directly (there's no UI call site today), so the gate
+    // must live here rather than in JS.
+    AsyncFunction("deleteWallet") { (walletId: String) async throws -> Void in
+      do {
+        let id = try NativeWalletStore.validateWalletId(walletId)
+        _ = try await Self.authenticatedContext(reason: "Delete wallet")
+        try NativeWalletStore.deleteMnemonic(walletId: id)
+        var metadata = try NativeWalletStore.loadMetadata()
+        metadata.removeValue(forKey: id)
+        try NativeWalletStore.saveMetadata(metadata)
+      } catch let e as NativeWalletStoreError {
+        throw e.asException
+      }
     }
 
     // Triggers the native biometry/passcode prompt, then signs entirely in-process.
     // Returns { signedTx, meta? }.
     AsyncFunction("signTransaction") { (walletId: String, chain: String, unsignedTx: [String: Any]) async throws -> [String: Any] in
-      let chainKey = try ChainKey(fromJs: chain)
-      let context = try await Self.authenticatedContext(reason: "Sign transaction")
-      let mnemonic = try NativeWalletStore.loadMnemonic(walletId: walletId, context: context)
-      guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: "") else {
-        throw Exception(name: "InvalidMnemonic", description: "Stored mnemonic failed validation")
+      do {
+        let id = try NativeWalletStore.validateWalletId(walletId)
+        let chainKey = try ChainKey(fromJs: chain)
+        let context = try await Self.authenticatedContext(reason: "Sign transaction")
+        let mnemonic = try NativeWalletStore.loadMnemonic(walletId: id, context: context)
+        guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: "") else {
+          throw Exception(name: "InvalidMnemonic", description: "Stored mnemonic failed validation")
+        }
+        let result = try ChainSigner.sign(chain: chainKey, wallet: wallet, unsignedTx: unsignedTx)
+        var response: [String: Any] = ["signedTx": result.signedTx]
+        if let meta = result.meta { response["meta"] = meta }
+        return response
+      } catch let e as NativeWalletStoreError {
+        throw e.asException
       }
-      let result = try ChainSigner.sign(chain: chainKey, wallet: wallet, unsignedTx: unsignedTx)
-      var response: [String: Any] = ["signedTx": result.signedTx]
-      if let meta = result.meta { response["meta"] = meta }
-      return response
     }
 
     // The one sanctioned mnemonic exposure — explicit backup flow only.
     AsyncFunction("exportMnemonic") { (walletId: String) async throws -> String in
-      let context = try await Self.authenticatedContext(reason: "Reveal recovery phrase")
-      return try NativeWalletStore.loadMnemonic(walletId: walletId, context: context)
+      do {
+        let id = try NativeWalletStore.validateWalletId(walletId)
+        let context = try await Self.authenticatedContext(reason: "Reveal recovery phrase")
+        return try NativeWalletStore.loadMnemonic(walletId: id, context: context)
+      } catch let e as NativeWalletStoreError {
+        throw e.asException
+      }
     }
   }
 
@@ -72,9 +104,18 @@ public class TrustWalletCoreModule: Module {
     }
 
     try NativeWalletStore.saveMnemonic(wallet.mnemonic, walletId: walletId)
-    var metadata = NativeWalletStore.loadMetadata()
-    metadata[walletId] = addresses
-    try NativeWalletStore.saveMetadata(metadata)
+    do {
+      var metadata = try NativeWalletStore.loadMetadata()
+      metadata[walletId] = addresses
+      try NativeWalletStore.saveMetadata(metadata)
+    } catch {
+      // The mnemonic is already persisted but has no metadata pointer — compensate by
+      // best-effort deleting it rather than leaving a permanent, invisible orphan. If this
+      // rollback delete also fails, there's nothing more useful to do than propagate the
+      // original error; the item is at least no worse off than before this call.
+      try? NativeWalletStore.deleteMnemonic(walletId: walletId)
+      throw error
+    }
 
     return ["walletId": walletId, "addresses": addresses]
   }
