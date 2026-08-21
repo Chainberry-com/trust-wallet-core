@@ -49,19 +49,26 @@ class TrustWalletCoreModule : Module() {
       }
     }
 
-    AsyncFunction("deleteWallet") { walletId: String ->
-      NativeWalletStore.deleteMnemonic(context, walletId)
+    // Irreversible — requires a fresh biometric/device-credential confirmation before
+    // anything is deleted, same gate as `signTransaction`/`exportMnemonic`. A
+    // compromised/malicious JS caller can still invoke this directly (there's no UI call
+    // site today), so the gate must live here rather than in JS.
+    AsyncFunction("deleteWallet") Coroutine { walletId: String ->
+      val id = NativeWalletStore.validateWalletId(walletId)
+      NativeWalletStore.confirmIdentity(activity, "Delete wallet")
+      NativeWalletStore.deleteMnemonic(context, id)
       val metadata = NativeWalletStore.loadMetadata(context).toMutableMap()
-      metadata.remove(walletId)
+      metadata.remove(id)
       NativeWalletStore.saveMetadata(context, metadata)
     }
 
     // Triggers the native biometry/device-credential prompt, then signs entirely in-process.
     // Returns { signedTx, meta? }.
     AsyncFunction("signTransaction") Coroutine { walletId: String, chain: String, unsignedTx: Map<String, Any> ->
+      val id = NativeWalletStore.validateWalletId(walletId)
       val chainKey = ChainKey.fromJs(chain)
-      val cipher = NativeWalletStore.authenticate(activity, NativeWalletStore.decryptCipher(context, walletId), "Sign transaction")
-      val mnemonic = NativeWalletStore.loadMnemonic(context, walletId, cipher)
+      val cipher = NativeWalletStore.authenticate(activity, NativeWalletStore.decryptCipher(context, id), "Sign transaction")
+      val mnemonic = NativeWalletStore.loadMnemonic(context, id, cipher)
       val wallet = HDWallet(mnemonic, "")
       val result = ChainSigner.sign(chainKey, wallet, unsignedTx)
       val response = mutableMapOf<String, Any>("signedTx" to result.signedTx)
@@ -71,8 +78,9 @@ class TrustWalletCoreModule : Module() {
 
     // The one sanctioned mnemonic exposure — explicit backup flow only.
     AsyncFunction("exportMnemonic") Coroutine { walletId: String ->
-      val cipher = NativeWalletStore.authenticate(activity, NativeWalletStore.decryptCipher(context, walletId), "Reveal recovery phrase")
-      NativeWalletStore.loadMnemonic(context, walletId, cipher)
+      val id = NativeWalletStore.validateWalletId(walletId)
+      val cipher = NativeWalletStore.authenticate(activity, NativeWalletStore.decryptCipher(context, id), "Reveal recovery phrase")
+      NativeWalletStore.loadMnemonic(context, id, cipher)
     }
   }
 
@@ -83,9 +91,18 @@ class TrustWalletCoreModule : Module() {
     val cipher = NativeWalletStore.authenticate(activity, NativeWalletStore.encryptCipher(walletId), "Secure your new wallet")
     NativeWalletStore.saveMnemonic(context, walletId, wallet.mnemonic(), cipher)
 
-    val metadata = NativeWalletStore.loadMetadata(context).toMutableMap()
-    metadata[walletId] = addresses
-    NativeWalletStore.saveMetadata(context, metadata)
+    try {
+      val metadata = NativeWalletStore.loadMetadata(context).toMutableMap()
+      metadata[walletId] = addresses
+      NativeWalletStore.saveMetadata(context, metadata)
+    } catch (e: Exception) {
+      // The mnemonic/key is already persisted but has no metadata pointer — compensate by
+      // best-effort deleting it rather than leaving a permanent, invisible orphan. If this
+      // rollback delete also fails, there's nothing more useful to do than propagate the
+      // original error; the wallet is at least no worse off than before this call.
+      runCatching { NativeWalletStore.deleteMnemonic(context, walletId) }
+      throw e
+    }
 
     return mapOf("walletId" to walletId, "addresses" to addresses)
   }
