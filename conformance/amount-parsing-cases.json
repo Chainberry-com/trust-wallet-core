@@ -1,0 +1,29 @@
+[
+  { "id": "xrp-amount-valid", "fn": "xrpAmountDrops", "input": "1000000", "expect": "valid" },
+  { "id": "xrp-amount-nonnumeric", "fn": "xrpAmountDrops", "input": "abc", "expect": "throws" },
+  { "id": "xrp-amount-empty", "fn": "xrpAmountDrops", "input": "", "expect": "throws" },
+  { "id": "xrp-amount-decimal", "fn": "xrpAmountDrops", "input": "12.5", "expect": "throws" },
+  { "id": "xrp-amount-negative", "fn": "xrpAmountDrops", "input": "-100", "expect": "throws" },
+  { "id": "xrp-amount-zero", "fn": "xrpAmountDrops", "input": "0", "expect": "throws" },
+  { "id": "xrp-amount-whitespace", "fn": "xrpAmountDrops", "input": " 100", "expect": "throws" },
+
+  { "id": "xrp-fee-valid", "fn": "xrpFeeDrops", "input": "12", "expect": "valid" },
+  { "id": "xrp-fee-zero-valid", "fn": "xrpFeeDrops", "input": "0", "expect": "valid" },
+  { "id": "xrp-fee-nonnumeric", "fn": "xrpFeeDrops", "input": "xx", "expect": "throws" },
+  { "id": "xrp-fee-empty", "fn": "xrpFeeDrops", "input": "", "expect": "throws" },
+  { "id": "xrp-fee-decimal", "fn": "xrpFeeDrops", "input": "1.5", "expect": "throws" },
+  { "id": "xrp-fee-negative", "fn": "xrpFeeDrops", "input": "-1", "expect": "throws" },
+
+  { "id": "xrp-tag-valid-zero", "fn": "xrpDestinationTag", "input": 0, "expect": "valid" },
+  { "id": "xrp-tag-valid-mid", "fn": "xrpDestinationTag", "input": 12345, "expect": "valid" },
+  { "id": "xrp-tag-valid-max", "fn": "xrpDestinationTag", "input": 4294967295, "expect": "valid" },
+  { "id": "xrp-tag-negative", "fn": "xrpDestinationTag", "input": -1, "expect": "throws" },
+  { "id": "xrp-tag-overflow", "fn": "xrpDestinationTag", "input": 4294967296, "expect": "throws" },
+
+  { "id": "ton-amount-valid", "fn": "tonNanotons", "input": "1000000000", "expect": "valid" },
+  { "id": "ton-amount-nonnumeric", "fn": "tonNanotons", "input": "not-a-number", "expect": "throws" },
+  { "id": "ton-amount-empty", "fn": "tonNanotons", "input": "", "expect": "throws" },
+  { "id": "ton-amount-decimal", "fn": "tonNanotons", "input": "1.5", "expect": "throws" },
+  { "id": "ton-amount-negative", "fn": "tonNanotons", "input": "-1", "expect": "throws" },
+  { "id": "ton-amount-zero", "fn": "tonNanotons", "input": "0", "expect": "throws" }
+]

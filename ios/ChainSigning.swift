@@ -80,26 +80,47 @@ enum ChainSigner {
 
     let privateKey = wallet.getKeyForCoin(coin: coin)
 
+    guard let gasLimitData = hexData(gasLimHex) else {
+      throw Exception(name: "InvalidParams", description: "Invalid gasLimitHex: \(gasLimHex)")
+    }
+    guard let valueData = hexData(valueHex) else {
+      throw Exception(name: "InvalidParams", description: "Invalid valueHex: \(valueHex)")
+    }
+
     var input = EthereumSigningInput()
     input.chainID = intToData(chainId)
     input.nonce = intToData(nonce)
-    input.gasLimit = hexData(gasLimHex) ?? Data()
+    input.gasLimit = gasLimitData
     input.toAddress = to
     input.privateKey = privateKey.data
     var transfer = EthereumTransaction.Transfer()
-    transfer.amount = hexData(valueHex) ?? Data([0])
-    if !dataHex.isEmpty { transfer.data = hexData(dataHex) ?? Data() }
+    transfer.amount = valueData
+    if !dataHex.isEmpty {
+      guard let dataBytes = hexData(dataHex) else {
+        throw Exception(name: "InvalidParams", description: "Invalid dataHex: \(dataHex)")
+      }
+      transfer.data = dataBytes
+    }
     var tx = EthereumTransaction()
     tx.transfer = transfer
     input.transaction = tx
 
     if let gasPriceHex = txParams["gasPriceHex"] as? String {
-      input.gasPrice = hexData(gasPriceHex) ?? Data()
+      guard let gasPriceData = hexData(gasPriceHex) else {
+        throw Exception(name: "InvalidParams", description: "Invalid gasPriceHex: \(gasPriceHex)")
+      }
+      input.gasPrice = gasPriceData
     } else if let mfHex = txParams["maxFeePerGasHex"] as? String,
               let pfHex = txParams["maxPriorityFeePerGasHex"] as? String {
+      guard let maxFeeData = hexData(mfHex) else {
+        throw Exception(name: "InvalidParams", description: "Invalid maxFeePerGasHex: \(mfHex)")
+      }
+      guard let maxPriorityData = hexData(pfHex) else {
+        throw Exception(name: "InvalidParams", description: "Invalid maxPriorityFeePerGasHex: \(pfHex)")
+      }
       input.txMode = .enveloped
-      input.maxFeePerGas = hexData(mfHex) ?? Data()
-      input.maxInclusionFeePerGas = hexData(pfHex) ?? Data()
+      input.maxFeePerGas = maxFeeData
+      input.maxInclusionFeePerGas = maxPriorityData
     }
 
     let output: EthereumSigningOutput = AnySigner.sign(input: input, coin: coin)
@@ -259,14 +280,16 @@ enum ChainSigner {
     let privateKey = wallet.getKeyForCoin(coin: .xrp)
 
     var payment = RippleOperationPayment()
-    payment.amount = Int64(amountDrops) ?? 0
+    payment.amount = try parseXrpAmountDrops(amountDrops)
     payment.destination = destination
-    if let tag = destinationTag { payment.destinationTag = UInt64(tag) }
+    if let resolvedTag = try parseXrpDestinationTag(destinationTag) {
+      payment.destinationTag = resolvedTag
+    }
 
     var input = RippleSigningInput()
     input.privateKey = privateKey.data
     input.account = account
-    input.fee = Int64(feeDrops) ?? 0
+    input.fee = try parseXrpFeeDrops(feeDrops)
     input.sequence = UInt32(sequence)
     if let lls = lastLedgerSequence { input.lastLedgerSequence = UInt32(lls) }
     input.opPayment = payment
@@ -297,7 +320,7 @@ enum ChainSigner {
     let privateKey = wallet.getKeyForCoin(coin: .ton)
 
     // amount is Data (uint128 big-endian); encode the nanoton UInt64 as 8 big-endian bytes.
-    let nanotons = UInt64(amountStr) ?? 0
+    let nanotons = try parseTonNanotons(amountStr)
     var bigEndianNano = nanotons.bigEndian
     let amountData = withUnsafeBytes(of: &bigEndianNano) { Data($0) }
 
@@ -324,11 +347,17 @@ enum ChainSigner {
 
   // MARK: - Helpers
 
-  // Parses a hex string (with or without 0x, odd or even length) into Data.
+  // Parses a hex string (with or without 0x, odd or even length) into Data. An empty string
+  // deliberately maps to a single zero byte (fields like valueHex already default to "0"
+  // when absent — that's a legitimate zero-value transfer, not malformed input). Any
+  // non-empty string containing a non-hex character returns nil so callers can fail closed
+  // instead of silently coercing garbage into a zero/empty value.
   static func hexData(_ hex: String) -> Data? {
     let s = hex.hasPrefix("0x") ? String(hex.dropFirst(2)) : hex
     let padded = s.count % 2 == 0 ? s : "0" + s
-    return padded.isEmpty ? Data([0]) : Data(hexString: padded)
+    guard !padded.isEmpty else { return Data([0]) }
+    guard padded.allSatisfy({ $0.isHexDigit }) else { return nil }
+    return Data(hexString: padded)
   }
 
   // Encodes a non-negative integer as minimal big-endian Data.

@@ -233,16 +233,16 @@ object ChainSigner {
     val feeDrops = unsignedTx["Fee"] as? String ?: throw ChainSigningException("Missing Fee")
     val sequence = (unsignedTx["Sequence"] as? Number)?.toInt() ?: throw ChainSigningException("Missing Sequence")
     val lastLedgerSequence = (unsignedTx["LastLedgerSequence"] as? Number)?.toInt()
-    val destinationTag = (unsignedTx["DestinationTag"] as? Number)?.toLong()
+    val destinationTag = parseXrpDestinationTag((unsignedTx["DestinationTag"] as? Number)?.toLong())
 
     val input = Ripple.SigningInput.newBuilder().apply {
       this.privateKey = ByteString.copyFrom(privateKey.data())
       this.account = account
-      this.fee = feeDrops.toLong()
+      this.fee = parseXrpFeeDrops(feeDrops)
       this.sequence = sequence
       lastLedgerSequence?.let { this.lastLedgerSequence = it }
       this.opPayment = Ripple.OperationPayment.newBuilder().apply {
-        this.amount = amountDrops.toLong()
+        this.amount = parseXrpAmountDrops(amountDrops)
         this.destination = destination
         destinationTag?.let { this.destinationTag = it }
       }.build()
@@ -263,14 +263,15 @@ object ChainSigner {
   private fun signTon(wallet: HDWallet, unsignedTx: Map<String, Any>): ChainSignResult {
     val privateKey = wallet.getKeyForCoin(CoinType.TON)
     val toAddress = unsignedTx["toAddress"] as? String ?: throw ChainSigningException("Missing toAddress")
-    val amount = (unsignedTx["amount"] as? String)?.toULongOrNull() ?: throw ChainSigningException("Missing amount")
+    val amountStr = unsignedTx["amount"] as? String ?: throw ChainSigningException("Missing amount")
+    val amount = parseTonNanotons(amountStr)
     val seqno = (unsignedTx["seqno"] as? Number)?.toInt() ?: throw ChainSigningException("Missing seqno")
     val memoId = unsignedTx["memoId"] as? String
     val expireAt = (System.currentTimeMillis() / 1000L + 600L).toInt()
 
     val transfer = TheOpenNetwork.Transfer.newBuilder().apply {
       this.dest = toAddress
-      this.amount = amount.toLong()
+      this.amount = amount
       this.mode = TheOpenNetwork.SendMode.PAY_FEES_SEPARATELY_VALUE or TheOpenNetwork.SendMode.IGNORE_ACTION_PHASE_ERRORS_VALUE
       this.bounceable = true
       memoId?.let { this.comment = it }

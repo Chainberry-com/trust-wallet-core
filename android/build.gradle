@@ -66,4 +66,10 @@ dependencies {
   implementation 'com.google.protobuf:protobuf-javalite:3.21.9'
   // BiometricPrompt (biometry-or-device-credential gating on the Keystore-backed wallet cipher)
   implementation 'androidx.biometric:biometric:1.1.0'
+
+  // JVM unit tests (src/test) — AmountParsingConformanceTest reads the shared JSON fixture
+  // in ../conformance/. Use the pure-Java org.json artifact, not android.jar's stubbed
+  // org.json (which throws "Stub!" outside Robolectric/instrumented tests).
+  testImplementation 'junit:junit:4.13.2'
+  testImplementation 'org.json:json:20240303'
 }
