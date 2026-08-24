@@ -1,0 +1,60 @@
+{
+  "_note": "Vectors verified against Trust Wallet Core 4.1.19 (the pinned version on both platforms). Test mnemonic is the BIP39 standard test vector — never use with real funds. Add a signing-vectors.json alongside this file when byte-for-byte signed-output parity is established per chain.",
+  "testMnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "testPassphrase": "",
+  "addressDerivation": [
+    {
+      "chain": "ethereum",
+      "expected": "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F",
+      "status": "verified"
+    },
+    {
+      "chain": "bnb",
+      "expected": "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F",
+      "status": "verified",
+      "_note": "BNB Smart Chain shares CoinType.ETHEREUM (same secp256k1 key, same BIP44 path m/44'/60'/0'/0/0)"
+    },
+    {
+      "chain": "polygon",
+      "expected": "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F",
+      "status": "verified",
+      "_note": "Polygon shares CoinType.ETHEREUM (same secp256k1 key, same BIP44 path m/44'/60'/0'/0/0)"
+    },
+    {
+      "chain": "bitcoin",
+      "expected": null,
+      "status": "pending-verification",
+      "_note": "Run AddressDerivationConformanceTest with status=pending to print the actual 4.1.19 address, then set expected and change status to verified"
+    },
+    {
+      "chain": "litecoin",
+      "expected": null,
+      "status": "pending-verification"
+    },
+    {
+      "chain": "xrp",
+      "expected": null,
+      "status": "pending-verification"
+    },
+    {
+      "chain": "tron",
+      "expected": null,
+      "status": "pending-verification"
+    },
+    {
+      "chain": "ton",
+      "expected": null,
+      "status": "pending-verification"
+    },
+    {
+      "chain": "solana",
+      "expected": null,
+      "status": "pending-verification"
+    },
+    {
+      "chain": "bitcoincash",
+      "expected": null,
+      "status": "pending-verification"
+    }
+  ]
+}

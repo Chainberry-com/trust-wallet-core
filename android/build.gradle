@@ -72,4 +72,10 @@ dependencies {
   // org.json (which throws "Stub!" outside Robolectric/instrumented tests).
   testImplementation 'junit:junit:4.13.2'
   testImplementation 'org.json:json:20240303'
+
+  // Instrumented tests (src/androidTest) — AddressDerivationConformanceTest needs the
+  // TrustWalletCore JNI library, which can only load on a real device or emulator.
+  // Run via: ./gradlew connectedDebugAndroidTest
+  androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+  androidTestImplementation 'androidx.test:runner:1.5.2'
 }
