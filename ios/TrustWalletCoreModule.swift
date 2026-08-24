@@ -127,22 +127,68 @@ public class TrustWalletCoreModule: Module {
     let context = LAContext()
     var evalError: NSError?
     guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &evalError) else {
-      throw Exception(
-        name: "BiometryUnavailable",
-        description: evalError?.localizedDescription ?? "No biometry or device passcode is set up"
-      )
+      throw classifyAuthError(evalError, fallbackDescription: "No biometry or device passcode is set up")
     }
     return try await withCheckedThrowingContinuation { continuation in
       context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, authError in
         if success {
           continuation.resume(returning: context)
         } else {
-          continuation.resume(throwing: Exception(
-            name: "AuthenticationFailed",
-            description: authError?.localizedDescription ?? "Authentication failed"
-          ))
+          continuation.resume(throwing: classifyAuthError(authError, fallbackDescription: "Authentication failed"))
         }
       }
+    }
+  }
+
+  /// Classifies an `LAError` from either `canEvaluatePolicy`'s precheck or `evaluatePolicy`'s
+  /// prompt callback into the same typed error codes Android's `NativeWalletStore.kt`
+  /// (`classifyPromptError`/`AuthUnavailable`) uses, so `use-wallet.ts`'s `WALLET_ERROR_COPY` —
+  /// written once, keyed by code, shared across both platforms — actually fires here instead of
+  /// every prompt failure collapsing into one generic "Authentication failed" banner. This
+  /// matters most for cancellation: dismissing the prompt must produce `ERR_WALLET_AUTH_CANCELLED`
+  /// (mapped to a quiet no-op, not a banner) on both platforms, not just Android.
+  ///
+  /// Deliberately does not attempt an iOS equivalent of Android's `KeyInvalidated`
+  /// (`KeyPermanentlyInvalidatedException` after an enrollment change) — on iOS that surfaces
+  /// later, as a `SecItemCopyMatching` `OSStatus` failure inside `loadMnemonic`, not as an
+  /// `LAError` here; aligning that would mean auditing `NativeWalletStore.classify(_:)`'s
+  /// `errSecAuthFailed`/`errSecInteractionNotAllowed` handling separately; scoped out of this
+  /// pass since a wrong OSStatus->meaning mapping there is materially harder to get right without
+  /// device verification than this prompt-level LAError classification is.
+  private static func classifyAuthError(_ error: Error?, fallbackDescription: String) -> Exception {
+    guard let laError = error as? LAError else {
+      return Exception(
+        name: "AuthenticationFailed",
+        description: error?.localizedDescription ?? fallbackDescription,
+        code: "ERR_AUTHENTICATION_FAILED"
+      )
+    }
+    switch laError.code {
+    case .userCancel, .appCancel, .systemCancel:
+      // User dismissed the prompt rather than authentication actually failing — kept distinct
+      // from the default case below so `WALLET_ERROR_COPY`'s `null` entry for this code can
+      // treat it as a quiet no-op instead of an error to surface (mirrors Android's
+      // `AuthCancelled`).
+      return Exception(name: "AuthCancelled", description: "Authentication was cancelled", code: "ERR_WALLET_AUTH_CANCELLED")
+    case .biometryLockout:
+      // iOS exposes one lockout state (cleared only by a passcode unlock), closest to Android's
+      // ERROR_LOCKOUT_PERMANENT rather than its auto-clearing temporary variant.
+      return Exception(
+        name: "AuthLockedOutPermanent",
+        description: "Too many failed authentication attempts — unlock your device to reset",
+        code: "ERR_WALLET_AUTH_LOCKED_OUT_PERMANENT"
+      )
+    case .biometryNotAvailable, .biometryNotEnrolled, .passcodeNotSet:
+      // Existing-wallet-use-time unavailability (no secure auth is currently satisfiable) —
+      // mirrors Android's `AuthUnavailable` precheck, distinct from `.noDevicePasscode`
+      // (`ERR_NO_DEVICE_PASSCODE`) which is specifically the wallet-*creation*-time gate.
+      return Exception(
+        name: "AuthUnavailable",
+        description: "Authentication unavailable: \(laError.localizedDescription)",
+        code: "ERR_WALLET_AUTH_UNAVAILABLE"
+      )
+    default:
+      return Exception(name: "AuthenticationFailed", description: laError.localizedDescription, code: "ERR_AUTHENTICATION_FAILED")
     }
   }
 }

@@ -1,5 +1,6 @@
 package expo.modules.trustwalletcore
 
+import android.security.keystore.KeyProperties
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import org.junit.Assert.assertEquals
@@ -15,13 +16,16 @@ import java.util.UUID
 // Plain JVM unit tests (no Robolectric/instrumentation, same rationale as
 // AmountParsingConformanceTest) for the pieces of NativeWalletStore that don't need an
 // Android Context/Keystore/BiometricPrompt: wallet-id validation, the File-based
-// metadata/delete helpers, the keyAlias scheme, and the pure canAuthenticate()-result /
-// BiometricPrompt-errorCode classification functions — all extracted specifically to be
-// testable this way. The auth-gated paths that actually drive a Keystore key or a
-// FragmentActivity/BiometricPrompt (mode resolution, both authenticateFor*Wallet flows,
-// confirmIdentity) need a real device/emulator and are covered by manual end-to-end
-// verification instead (see the remediation plan's verification section — API 24/28/29/30/35 x
-// biometric-only/credential-only/both/neither/changed-enrollment/lockout states).
+// metadata/delete helpers, the keyAlias scheme, the pure canAuthenticate()-result /
+// BiometricPrompt-errorCode classification functions, and the pure KeyInfo-securityLevel
+// description functions — all extracted specifically to be testable this way. The auth-gated
+// paths that actually drive a Keystore key or a FragmentActivity/BiometricPrompt (mode
+// resolution, both authenticateFor*Wallet flows, confirmIdentity, the StrongBox-request/fallback
+// in generateKey, and the real KeyInfo introspection in logKeySecurityLevel) need a real
+// device/emulator and are covered by manual end-to-end verification instead (see the remediation
+// plan's verification section — API 24/28/29/30/35 x biometric-only/credential-only/both/
+// neither/changed-enrollment/lockout states, plus StrongBox-present/TEE-only/software-only key
+// generation).
 class NativeWalletStoreTest {
 
   @get:Rule
@@ -166,6 +170,17 @@ class NativeWalletStoreTest {
     assertFalse(bioAlias == credAlias)
   }
 
+  @Test
+  fun keyAlias_legacyCombinedHasNoInfix() {
+    // Regression check for the orphaned-wallet bug: a wallet created before the
+    // biometric/device-credential split used a bare "vault_wallet_<id>" alias (no bio_/cred_
+    // infix). resolveExistingMode's legacy fallback depends on keyAlias(LEGACY_COMBINED, id)
+    // reproducing that exact string, or a pre-split wallet becomes permanently unreachable again.
+    val id = UUID.randomUUID().toString()
+    val legacyAlias = NativeWalletStore.keyAlias(AuthMode.LEGACY_COMBINED, id)
+    assertEquals("vault_wallet_$id", legacyAlias)
+  }
+
   // ─── describeUnavailableReason ───────────────────────────────────────────────
 
   @Test
@@ -227,5 +242,33 @@ class NativeWalletStoreTest {
     assertTrue(error is NativeWalletStoreError.AuthenticationFailed)
     assertEquals("ERR_AUTHENTICATION_FAILED", error.code)
     assertEquals(BiometricPrompt.ERROR_NO_BIOMETRICS, (error as NativeWalletStoreError.AuthenticationFailed).errorCode)
+  }
+
+  // ─── describeSecurityLevel / describeLegacySecurityLevel ────────────────────
+
+  @Test
+  fun describeSecurityLevel_mapsEachKnownLevel() {
+    assertEquals("STRONGBOX", NativeWalletStore.describeSecurityLevel(KeyProperties.SECURITY_LEVEL_STRONGBOX))
+    assertEquals("TEE", NativeWalletStore.describeSecurityLevel(KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT))
+    assertEquals("SOFTWARE", NativeWalletStore.describeSecurityLevel(KeyProperties.SECURITY_LEVEL_SOFTWARE))
+  }
+
+  @Test
+  fun describeSecurityLevel_unknownLevelFallsThroughToGenericMessage() {
+    val description = NativeWalletStore.describeSecurityLevel(-999)
+    assertTrue(description.contains("-999"))
+    // Must never silently read as hardware-backed for a level this function doesn't recognize.
+    assertFalse(description == "STRONGBOX")
+    assertFalse(description == "TEE")
+  }
+
+  @Test
+  fun describeLegacySecurityLevel_insideSecureHardwareIsHardware() {
+    assertEquals("HARDWARE", NativeWalletStore.describeLegacySecurityLevel(true))
+  }
+
+  @Test
+  fun describeLegacySecurityLevel_notInsideSecureHardwareIsSoftware() {
+    assertEquals("SOFTWARE", NativeWalletStore.describeLegacySecurityLevel(false))
   }
 }

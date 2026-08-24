@@ -4,9 +4,12 @@ import android.app.KeyguardManager
 import android.content.Context
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
+import android.security.keystore.StrongBoxUnavailableException
 import android.security.keystore.UserNotAuthenticatedException
+import android.util.Log
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
@@ -22,6 +25,7 @@ import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -31,11 +35,11 @@ import kotlin.coroutines.suspendCoroutine
  * Which authenticator a wallet's Keystore key is gated by, chosen once at creation time (see
  * [NativeWalletStore.resolveAvailableMode]) and thereafter recoverable from which Keystore alias
  * exists for that wallet id (see [NativeWalletStore.resolveExistingMode]) — no separate metadata
- * needed. The two modes are deliberately separate flows rather than one prompt/key straddling
- * both: combining `BIOMETRIC_STRONG` and `DEVICE_CREDENTIAL` in a single `BiometricPrompt` (or in
- * a single per-use Keystore key) is not reliably supported on API 29 and below, per
- * https://developer.android.com/identity/sign-in/biometric-auth — see [NativeWalletStore] for
- * the full rationale.
+ * needed. The two *creatable* modes are deliberately separate flows rather than one prompt/key
+ * straddling both: combining `BIOMETRIC_STRONG` and `DEVICE_CREDENTIAL` in a single
+ * `BiometricPrompt` (or in a single per-use Keystore key) is not reliably supported on API 29 and
+ * below, per https://developer.android.com/identity/sign-in/biometric-auth — see
+ * [NativeWalletStore] for the full rationale.
  */
 enum class AuthMode(val aliasInfix: String) {
   /** Authentication-per-use: every single encrypt/decrypt requires a fresh `BIOMETRIC_STRONG`
@@ -49,6 +53,19 @@ enum class AuthMode(val aliasInfix: String) {
    * consequences of `CryptoObject` support for device-credential auth only existing from API 30
    * (androidx.biometric 1.1.0-alpha02) onward. */
   DEVICE_CREDENTIAL("cred_"),
+
+  /** Pre-migration scheme (alias `vault_wallet_<id>`, no infix — matches [aliasInfix] `""`) from
+   * before the biometric/device-credential split above existed: a single per-use key accepting
+   * *either* `BIOMETRIC_STRONG` or `DEVICE_CREDENTIAL` in one combined `BiometricPrompt`. Never
+   * chosen for a new wallet ([NativeWalletStore.resolveAvailableMode] never returns it) — it
+   * exists purely so [NativeWalletStore.resolveExistingMode] can still find and
+   * [NativeWalletStore.authenticateForExistingWallet] can still unlock a wallet that was created
+   * before the split shipped. The split's original commit assumed no such wallet could exist
+   * pre-launch and shipped with no migration path; that assumption turned out to be wrong (a
+   * real wallet created under this scheme was found to be permanently unreachable — `resolveExistingMode`
+   * only checked the two post-split aliases), so this case restores discoverability rather than
+   * silently stranding it. */
+  LEGACY_COMBINED(""),
 }
 
 /**
@@ -133,11 +150,22 @@ sealed class NativeWalletStoreError private constructor(code: String, message: S
 }
 
 /**
- * Persists mnemonics as files encrypted with a hardware-backed Android Keystore AES key (one key
- * per wallet), plus a parallel ungated metadata store (walletId -> per-chain addresses) for
- * read-only UI. Deliberately not `EncryptedSharedPreferences` or wallet-core's `StoredKey`
- * keystore-JSON — confidentiality comes entirely from the Keystore key never leaving the
- * TEE/StrongBox, not from the on-disk file encoding.
+ * Persists mnemonics as files encrypted with an Android Keystore AES key (one key per wallet),
+ * plus a parallel ungated metadata store (walletId -> per-chain addresses) for read-only UI.
+ * Deliberately not `EncryptedSharedPreferences` or wallet-core's `StoredKey` keystore-JSON —
+ * confidentiality comes from the Keystore key never leaving secure hardware when the device has
+ * any, not from the on-disk file encoding.
+ *
+ * ### Hardware backing is requested and verified, not assumed
+ *
+ * [getOrCreateKey] requests the strongest hardware backing available: StrongBox first (API 28+,
+ * `setIsStrongBoxBacked(true)`), falling back to a plain (TEE-or-better) Keystore key on
+ * `StrongBoxUnavailableException` or below API 28. Android Keystore keys can still end up
+ * software-only on devices/emulators without secure hardware, so after generating a fresh key
+ * this module inspects its actual [KeyInfo] and logs the real level achieved
+ * ([logKeySecurityLevel]) rather than asserting it blindly. Per this module's security model, a
+ * software-only key is tolerated (best-effort, never blocks wallet creation) — see the README's
+ * Security model section for the full policy.
  *
  * ### Biometric vs. device-credential: two separate flows, not one combined prompt
  *
@@ -157,8 +185,14 @@ sealed class NativeWalletStoreError private constructor(code: String, message: S
  * runs a `BiometricManager.canAuthenticate()` precheck before opening any UI, so availability
  * problems (not enrolled, no hardware, locked out, security patch required) surface as a specific
  * typed error instead of a generic mid-prompt failure.
+ *
+ * A wallet created before this split shipped still carries a third possible mode,
+ * [AuthMode.LEGACY_COMBINED] — [resolveExistingMode] and [authenticateForExistingWallet] both
+ * handle it so such a wallet stays reachable, but [resolveAvailableMode] (the only path that
+ * chooses a *new* wallet's mode) never produces it. See that case's doc for why it exists.
  */
 object NativeWalletStore {
+  private const val TAG = "NativeWalletStore"
   private const val KEY_ALIAS_PREFIX = "vault_wallet_"
   private const val ANDROID_KEYSTORE = "AndroidKeyStore"
   private const val TRANSFORMATION = "AES/GCM/NoPadding"
@@ -207,7 +241,15 @@ object NativeWalletStore {
     val ks = keyStore()
     (ks.getKey(alias, null) as? SecretKey)?.let { return it }
 
-    val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+    val key = generateKey(alias, mode)
+    logKeySecurityLevel(alias, key)
+    return key
+  }
+
+  /** Builds the [KeyGenParameterSpec] shared by both the StrongBox-requested attempt and its
+   * fallback — everything except whether StrongBox is requested is identical, so this is
+   * parameterized on [strongBox] rather than duplicated. */
+  private fun buildKeySpec(alias: String, mode: AuthMode, strongBox: Boolean): KeyGenParameterSpec {
     val builder = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
       .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
       .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
@@ -241,10 +283,87 @@ object NativeWalletStore {
           @Suppress("DEPRECATION")
           builder.setUserAuthenticationValidityDurationSeconds(WINDOW_SECONDS)
         }
+
+      AuthMode.LEGACY_COMBINED ->
+        // Unreachable in practice: getOrCreateKey only calls this when no existing alias was
+        // found, and LEGACY_COMBINED is only ever returned by resolveExistingMode for an alias
+        // that, by definition, already exists — resolveAvailableMode (the only source of a
+        // *new* wallet's mode) never returns it. Fails loudly rather than silently minting a
+        // new key under a scheme this codebase deliberately stopped creating.
+        error("LEGACY_COMBINED keys are never freshly generated — resolveExistingMode found alias '$alias' but getOrCreateKey couldn't retrieve it")
     }
 
-    keyGenerator.init(builder.build())
+    if (strongBox) {
+      builder.setIsStrongBoxBacked(true)
+    }
+
+    return builder.build()
+  }
+
+  /** Requests the strongest hardware backing available for a brand-new key: StrongBox first
+   * (API 28+), falling back to a plain Keystore key — which Keymaster may still back with a TEE
+   * or, on devices without secure hardware, software only — on [StrongBoxUnavailableException]
+   * or below API 28 (`setIsStrongBoxBacked` doesn't exist pre-P). The actual level achieved is
+   * verified separately by [logKeySecurityLevel]; this function never inspects it. */
+  private fun generateKey(alias: String, mode: AuthMode): SecretKey {
+    val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+      try {
+        keyGenerator.init(buildKeySpec(alias, mode, strongBox = true))
+        return keyGenerator.generateKey()
+      } catch (e: StrongBoxUnavailableException) {
+        Log.i(TAG, "StrongBox unavailable for $alias, falling back to a non-StrongBox key", e)
+      }
+    }
+    keyGenerator.init(buildKeySpec(alias, mode, strongBox = false))
     return keyGenerator.generateKey()
+  }
+
+  /** Pure `KeyInfo.securityLevel` -> human-readable-level mapping (API 31+), extracted so it's
+   * JVM-testable without a real Keystore key. */
+  internal fun describeSecurityLevel(securityLevel: Int): String = when (securityLevel) {
+    KeyProperties.SECURITY_LEVEL_STRONGBOX -> "STRONGBOX"
+    KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT -> "TEE"
+    KeyProperties.SECURITY_LEVEL_SOFTWARE -> "SOFTWARE"
+    else -> "UNKNOWN($securityLevel)"
+  }
+
+  /** Pure legacy `KeyInfo.isInsideSecureHardware` -> human-readable-level mapping (below API 31,
+   * where `getSecurityLevel()` doesn't exist and TEE vs. StrongBox can't be distinguished),
+   * extracted so it's JVM-testable without a real Keystore key. */
+  internal fun describeLegacySecurityLevel(insideSecureHardware: Boolean): String =
+    if (insideSecureHardware) "HARDWARE" else "SOFTWARE"
+
+  /** Verifies and logs the actual security level of a freshly generated key — best-effort only:
+   * this module's security model tolerates a software-only key (e.g. an emulator, or a device
+   * with no secure hardware at all) rather than blocking wallet creation, so this never throws
+   * on either a software-only result or an introspection failure, it only logs. Only called for
+   * freshly generated keys, not ones retrieved from an existing alias — the level can't change
+   * after creation, so re-checking on every retrieval would just be log noise. */
+  private fun logKeySecurityLevel(alias: String, key: SecretKey) {
+    try {
+      // SecretKeyFactory, not KeyFactory — KeyFactory is for asymmetric KeyPair material
+      // (PrivateKey/PublicKey); AndroidKeyStore only registers a symmetric-key ("AES") service
+      // under SecretKeyFactory, so KeyFactory.getInstance("AES", "AndroidKeyStore") throws
+      // NoSuchAlgorithmException for a SecretKey like this one.
+      // The Android stub's getKeySpec(SecretKey, Class<?>) is non-generic (unlike the desktop
+      // JDK's), returning a raw KeySpec — an explicit cast to KeyInfo is required here.
+      val keyInfo = SecretKeyFactory.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+        .getKeySpec(key, KeyInfo::class.java) as KeyInfo
+      val description = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        describeSecurityLevel(keyInfo.securityLevel)
+      } else {
+        @Suppress("DEPRECATION")
+        describeLegacySecurityLevel(keyInfo.isInsideSecureHardware)
+      }
+      if (description == "SOFTWARE") {
+        Log.w(TAG, "Keystore key $alias is NOT hardware-backed (level=$description) — this device has no usable secure hardware, falling back to software-only protection")
+      } else {
+        Log.i(TAG, "Keystore key $alias security level: $description")
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "Could not determine security level for Keystore key $alias", e)
+    }
   }
 
   /** Resolves which [AuthMode] to gate a *new* wallet's key with, preferring `BIOMETRIC_STRONG`
@@ -275,11 +394,15 @@ object NativeWalletStore {
     }
 
   /** Recovers which [AuthMode] an *existing* wallet's key was created with, purely from which
-   * Keystore alias exists — see [keyAlias]. */
+   * Keystore alias exists — see [keyAlias]. Checks [AuthMode.LEGACY_COMBINED] last: a wallet
+   * created before the biometric/device-credential split (see that case's doc) would otherwise
+   * be permanently unreachable despite its key and metadata both still being intact — this was
+   * found to actually happen, not just a theoretical gap. */
   private fun resolveExistingMode(walletId: String): AuthMode {
     val ks = keyStore()
     if (ks.containsAlias(keyAlias(AuthMode.BIOMETRIC_STRONG, walletId))) return AuthMode.BIOMETRIC_STRONG
     if (ks.containsAlias(keyAlias(AuthMode.DEVICE_CREDENTIAL, walletId))) return AuthMode.DEVICE_CREDENTIAL
+    if (ks.containsAlias(keyAlias(AuthMode.LEGACY_COMBINED, walletId))) return AuthMode.LEGACY_COMBINED
     throw NativeWalletStoreError.NotFound(walletId)
   }
 
@@ -294,6 +417,11 @@ object NativeWalletStore {
         biometricManager.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
           BiometricManager.BIOMETRIC_SUCCESS
       AuthMode.DEVICE_CREDENTIAL -> deviceCredentialAvailable(context, biometricManager)
+      // Accepts either, same as the key itself does — mirrors resolveAvailableMode's
+      // BIOMETRIC_STRONG-or-DEVICE_CREDENTIAL precedence rather than requiring both.
+      AuthMode.LEGACY_COMBINED ->
+        biometricManager.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
+          BiometricManager.BIOMETRIC_SUCCESS || deviceCredentialAvailable(context, biometricManager)
     }
     if (!available) {
       val result = if (mode == AuthMode.BIOMETRIC_STRONG) {
@@ -380,18 +508,18 @@ object NativeWalletStore {
 
   /** Idempotent: deleting a wallet id whose file is already gone is a no-op, matching normal
    * `deleteWallet` semantics. Both the file deletion and the Keystore-entry deletion results
-   * are checked and propagate on failure — neither is silently discarded. Tries both possible
-   * mode aliases (only one will ever exist for a given wallet) plus the pre-migration unprefixed
-   * alias from before [AuthMode] existed, so cleanup doesn't need to know which mode a wallet
-   * used — `KeyStore.deleteEntry` on the AndroidKeyStore provider is a documented no-op (not a
-   * throw) for an alias that doesn't exist. */
+   * are checked and propagate on failure — neither is silently discarded. Tries all three
+   * possible aliases, including [AuthMode.LEGACY_COMBINED] (only one will ever exist for a given
+   * wallet), so cleanup doesn't need to know which mode a wallet used — `KeyStore.deleteEntry` on
+   * the AndroidKeyStore provider is a documented no-op (not a throw) for an alias that doesn't
+   * exist. */
   fun deleteMnemonic(context: Context, walletId: String) {
     deleteFileChecked(mnemonicFile(context, walletId), walletId)
     try {
       val ks = keyStore()
       ks.deleteEntry(keyAlias(AuthMode.BIOMETRIC_STRONG, walletId))
       ks.deleteEntry(keyAlias(AuthMode.DEVICE_CREDENTIAL, walletId))
-      ks.deleteEntry(KEY_ALIAS_PREFIX + walletId)
+      ks.deleteEntry(keyAlias(AuthMode.LEGACY_COMBINED, walletId))
     } catch (e: Exception) {
       throw NativeWalletStoreError.DeleteFailed(walletId, e)
     }
@@ -470,6 +598,8 @@ object NativeWalletStore {
         confirmDeviceCredential(activity, title)
         buildEncryptCipher(walletId, mode)
       }
+      // Unreachable: resolveAvailableMode never returns LEGACY_COMBINED — see that case's doc.
+      AuthMode.LEGACY_COMBINED -> error("resolveAvailableMode returned LEGACY_COMBINED, which it must never do")
     }
 
   /** Authenticates and returns a `Cipher` ready for [loadMnemonic], for an existing wallet id.
@@ -489,6 +619,8 @@ object NativeWalletStore {
         confirmDeviceCredential(activity, title)
         buildDecryptCipher(context, walletId, mode)
       }
+      AuthMode.LEGACY_COMBINED ->
+        authenticateCombinedLegacy(activity, buildDecryptCipher(context, walletId, mode), title)
     }
   }
 
@@ -523,15 +655,52 @@ object NativeWalletStore {
       }
     }
 
+  /** Pre-migration combined `BIOMETRIC_STRONG | DEVICE_CREDENTIAL`, `CryptoObject`-bound prompt —
+   * this is exactly what [authenticateBiometric] replaced, preserved solely so an
+   * [AuthMode.LEGACY_COMBINED] wallet (created before the split) stays unlockable. Never used for
+   * a new key. Carries the same reliability caveat the split was written to fix: this combination
+   * isn't reliably supported by `BiometricPrompt` on API 29 and below — an existing, unavoidable
+   * (short of forcing every such wallet through a re-encrypt) limitation for old wallets on old
+   * API levels, not a new regression. */
+  private suspend fun authenticateCombinedLegacy(activity: FragmentActivity, cipher: Cipher, title: String): Cipher =
+    withContext(Dispatchers.Main) {
+      suspendCoroutine { continuation ->
+        val prompt = biometricPrompt(
+          activity,
+          onSucceeded = { result ->
+            val authenticatedCipher = result.cryptoObject?.cipher
+            if (authenticatedCipher == null) {
+              continuation.resumeWithException(
+                NativeWalletStoreError.AuthenticationFailed("no authenticated cipher returned")
+              )
+            } else {
+              continuation.resume(authenticatedCipher)
+            }
+          },
+          onError = { code, errString -> continuation.resumeWithException(classifyPromptError(code, errString)) }
+        )
+        prompt.authenticate(
+          singleAuthenticatorPromptInfo(
+            title,
+            BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+          ),
+          BiometricPrompt.CryptoObject(cipher)
+        )
+      }
+    }
+
   /** Crypto-object-less confirmation prompt — for gating operations like `deleteWallet` that
    * don't perform a Keystore encrypt/decrypt themselves, so there's no `Cipher` to bind the
    * prompt to (and binding to one would wrongly fail when e.g. cleaning up a wallet whose key
    * is already broken/missing). Resolves availability the same way wallet creation does, since
-   * deleting isn't tied to any specific wallet's committed key mode. */
+   * deleting isn't tied to any specific wallet's committed key mode — this always chooses between
+   * the two *creatable* modes, never [AuthMode.LEGACY_COMBINED] (see [resolveAvailableMode]). */
   suspend fun confirmIdentity(activity: FragmentActivity, context: Context, title: String) {
     when (resolveAvailableMode(context)) {
       AuthMode.BIOMETRIC_STRONG -> confirmSingleAuthenticator(activity, title, BiometricManager.Authenticators.BIOMETRIC_STRONG)
       AuthMode.DEVICE_CREDENTIAL -> confirmDeviceCredential(activity, title)
+      // Unreachable: resolveAvailableMode never returns LEGACY_COMBINED — see that case's doc.
+      AuthMode.LEGACY_COMBINED -> error("resolveAvailableMode returned LEGACY_COMBINED, which it must never do")
     }
   }
 
