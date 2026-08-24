@@ -1,5 +1,7 @@
 package expo.modules.trustwalletcore
 
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -12,11 +14,14 @@ import java.util.UUID
 
 // Plain JVM unit tests (no Robolectric/instrumentation, same rationale as
 // AmountParsingConformanceTest) for the pieces of NativeWalletStore that don't need an
-// Android Context/Keystore/BiometricPrompt: wallet-id validation and the File-based
-// metadata/delete helpers extracted specifically to be testable this way. The
-// authentication-gated paths (persistNewWallet's rollback, deleteWallet's confirmIdentity
-// gate) need a real FragmentActivity/BiometricPrompt and are covered by manual end-to-end
-// verification instead (see the plan's verification section).
+// Android Context/Keystore/BiometricPrompt: wallet-id validation, the File-based
+// metadata/delete helpers, the keyAlias scheme, and the pure canAuthenticate()-result /
+// BiometricPrompt-errorCode classification functions — all extracted specifically to be
+// testable this way. The auth-gated paths that actually drive a Keystore key or a
+// FragmentActivity/BiometricPrompt (mode resolution, both authenticateFor*Wallet flows,
+// confirmIdentity) need a real device/emulator and are covered by manual end-to-end
+// verification instead (see the remediation plan's verification section — API 24/28/29/30/35 x
+// biometric-only/credential-only/both/neither/changed-enrollment/lockout states).
 class NativeWalletStoreTest {
 
   @get:Rule
@@ -147,5 +152,80 @@ class NativeWalletStoreTest {
     } finally {
       dir.setWritable(true)
     }
+  }
+
+  // ─── keyAlias ────────────────────────────────────────────────────────────────
+
+  @Test
+  fun keyAlias_encodesModeAndIsDistinctPerMode() {
+    val id = UUID.randomUUID().toString()
+    val bioAlias = NativeWalletStore.keyAlias(AuthMode.BIOMETRIC_STRONG, id)
+    val credAlias = NativeWalletStore.keyAlias(AuthMode.DEVICE_CREDENTIAL, id)
+    assertTrue(bioAlias.contains(id))
+    assertTrue(credAlias.contains(id))
+    assertFalse(bioAlias == credAlias)
+  }
+
+  // ─── describeUnavailableReason ───────────────────────────────────────────────
+
+  @Test
+  fun describeUnavailableReason_mapsEachKnownCode() {
+    val codes = listOf(
+      BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED,
+      BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE,
+      BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE,
+      BiometricManager.BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED,
+      BiometricManager.BIOMETRIC_ERROR_UNSUPPORTED,
+      BiometricManager.BIOMETRIC_STATUS_UNKNOWN,
+    )
+    // Every known code gets a distinct, non-generic reason string (i.e. none of them fall
+    // through to the "unavailable (status $n)" catch-all).
+    val reasons = codes.map { NativeWalletStore.describeUnavailableReason(it) }
+    assertEquals(reasons.size, reasons.toSet().size)
+    reasons.forEach { assertFalse(it.startsWith("unavailable (status")) }
+  }
+
+  @Test
+  fun describeUnavailableReason_unknownCodeFallsThroughToGenericMessage() {
+    val reason = NativeWalletStore.describeUnavailableReason(-999)
+    assertTrue(reason.contains("-999"))
+  }
+
+  // ─── classifyPromptError ─────────────────────────────────────────────────────
+
+  @Test
+  fun classifyPromptError_lockoutIsTemporary() {
+    val error = NativeWalletStore.classifyPromptError(BiometricPrompt.ERROR_LOCKOUT, "locked out")
+    assertTrue(error is NativeWalletStoreError.AuthLockedOutTemporary)
+    assertEquals("ERR_WALLET_AUTH_LOCKED_OUT", error.code)
+  }
+
+  @Test
+  fun classifyPromptError_lockoutPermanentIsDistinctFromTemporary() {
+    val error = NativeWalletStore.classifyPromptError(BiometricPrompt.ERROR_LOCKOUT_PERMANENT, "locked out for good")
+    assertTrue(error is NativeWalletStoreError.AuthLockedOutPermanent)
+    assertEquals("ERR_WALLET_AUTH_LOCKED_OUT_PERMANENT", error.code)
+  }
+
+  @Test
+  fun classifyPromptError_userCancelledVariantsAllMapToCancelled() {
+    val cancelCodes = listOf(
+      BiometricPrompt.ERROR_USER_CANCELED,
+      BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+      BiometricPrompt.ERROR_CANCELED,
+    )
+    cancelCodes.forEach { code ->
+      val error = NativeWalletStore.classifyPromptError(code, "cancelled")
+      assertTrue("code $code should classify as AuthCancelled", error is NativeWalletStoreError.AuthCancelled)
+      assertEquals("ERR_WALLET_AUTH_CANCELLED", error.code)
+    }
+  }
+
+  @Test
+  fun classifyPromptError_unrecognizedCodeFallsBackToAuthenticationFailed() {
+    val error = NativeWalletStore.classifyPromptError(BiometricPrompt.ERROR_NO_BIOMETRICS, "no biometrics enrolled")
+    assertTrue(error is NativeWalletStoreError.AuthenticationFailed)
+    assertEquals("ERR_AUTHENTICATION_FAILED", error.code)
+    assertEquals(BiometricPrompt.ERROR_NO_BIOMETRICS, (error as NativeWalletStoreError.AuthenticationFailed).errorCode)
   }
 }

@@ -55,7 +55,7 @@ class TrustWalletCoreModule : Module() {
     // site today), so the gate must live here rather than in JS.
     AsyncFunction("deleteWallet") Coroutine { walletId: String ->
       val id = NativeWalletStore.validateWalletId(walletId)
-      NativeWalletStore.confirmIdentity(activity, "Delete wallet")
+      NativeWalletStore.confirmIdentity(activity, context, "Delete wallet")
       NativeWalletStore.deleteMnemonic(context, id)
       val metadata = NativeWalletStore.loadMetadata(context).toMutableMap()
       metadata.remove(id)
@@ -67,7 +67,7 @@ class TrustWalletCoreModule : Module() {
     AsyncFunction("signTransaction") Coroutine { walletId: String, chain: String, unsignedTx: Map<String, Any> ->
       val id = NativeWalletStore.validateWalletId(walletId)
       val chainKey = ChainKey.fromJs(chain)
-      val cipher = NativeWalletStore.authenticate(activity, NativeWalletStore.decryptCipher(context, id), "Sign transaction")
+      val cipher = NativeWalletStore.authenticateForExistingWallet(activity, context, id, "Sign transaction")
       val mnemonic = NativeWalletStore.loadMnemonic(context, id, cipher)
       val wallet = HDWallet(mnemonic, "")
       val result = ChainSigner.sign(chainKey, wallet, unsignedTx)
@@ -79,7 +79,7 @@ class TrustWalletCoreModule : Module() {
     // The one sanctioned mnemonic exposure — explicit backup flow only.
     AsyncFunction("exportMnemonic") Coroutine { walletId: String ->
       val id = NativeWalletStore.validateWalletId(walletId)
-      val cipher = NativeWalletStore.authenticate(activity, NativeWalletStore.decryptCipher(context, id), "Reveal recovery phrase")
+      val cipher = NativeWalletStore.authenticateForExistingWallet(activity, context, id, "Reveal recovery phrase")
       NativeWalletStore.loadMnemonic(context, id, cipher)
     }
   }
@@ -88,7 +88,7 @@ class TrustWalletCoreModule : Module() {
     val walletId = UUID.randomUUID().toString()
     val addresses = ChainKey.entries.associate { chain -> chain.name.lowercase() to wallet.getAddressForCoin(chain.coinType) }
 
-    val cipher = NativeWalletStore.authenticate(activity, NativeWalletStore.encryptCipher(walletId), "Secure your new wallet")
+    val cipher = NativeWalletStore.authenticateForNewWallet(activity, context, walletId, "Secure your new wallet")
     NativeWalletStore.saveMnemonic(context, walletId, wallet.mnemonic(), cipher)
 
     try {
