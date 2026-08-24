@@ -10,7 +10,7 @@
   },
   "files": [
     "src",
-    "ios/TrustWalletCoreModule.swift",
+    "ios",
     "android/src",
     "android/build.gradle",
     "expo-module.config.json",

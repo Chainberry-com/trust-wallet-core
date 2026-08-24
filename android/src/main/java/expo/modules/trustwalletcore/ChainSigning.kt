@@ -34,6 +34,12 @@ enum class ChainKey(val coinType: CoinType) {
   LITECOIN(CoinType.LITECOIN),
   XRP(CoinType.XRP);
 
+  val symbol: String get() = when (this) {
+    ETHEREUM -> "ETH"; BNB -> "BNB"; POLYGON -> "POL"; SOLANA -> "SOL"
+    TRON -> "TRX"; TON -> "TON"; BITCOIN -> "BTC"; BITCOINCASH -> "BCH"
+    LITECOIN -> "LTC"; XRP -> "XRP"
+  }
+
   companion object {
     fun fromJs(raw: String): ChainKey =
       entries.find { it.name.equals(raw, ignoreCase = true) }
@@ -290,6 +296,70 @@ object ChainSigner {
     return ChainSignResult(output.encoded, mapOf("txHash" to output.hash.toByteArray().toHex()))
   }
 }
+
+// Transaction summary helpers (used by TrustWalletCoreModule for native confirmation UI)
+
+internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, Any>): String {
+  val lines = mutableListOf("Network: ${chain.name}")
+  when (chain) {
+    ChainKey.ETHEREUM, ChainKey.BNB, ChainKey.POLYGON -> {
+      (unsignedTx["to"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
+      val valueWei = txHexToDouble((unsignedTx["valueHex"] as? String) ?: "0")
+      lines += "Amount: ${fmtAmt(valueWei / 1e18)} ${chain.symbol}"
+      val gasLimit = txHexToDouble((unsignedTx["gasLimitHex"] as? String) ?: "0")
+      val gasPrice = txHexToDouble(
+        (unsignedTx["gasPriceHex"] as? String) ?: (unsignedTx["maxFeePerGasHex"] as? String) ?: "0"
+      )
+      val feeWei = gasLimit * gasPrice
+      if (feeWei > 0) lines += "Max fee: ${fmtAmt(feeWei / 1e18)} ${chain.symbol}"
+    }
+    ChainKey.BITCOIN, ChainKey.LITECOIN -> {
+      (unsignedTx["toAddress"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
+      (unsignedTx["sendAmountSats"] as? String)?.toLongOrNull()?.let {
+        lines += "Amount: ${fmtAmt(it.toDouble() / 1e8)} ${chain.symbol}"
+      }
+    }
+    ChainKey.XRP -> {
+      (unsignedTx["Destination"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
+      (unsignedTx["Amount"] as? String)?.toLongOrNull()?.let {
+        lines += "Amount: ${fmtAmt(it.toDouble() / 1_000_000.0)} XRP"
+      }
+      (unsignedTx["Fee"] as? String)?.toLongOrNull()?.let {
+        lines += "Fee: ${fmtAmt(it.toDouble() / 1_000_000.0)} XRP"
+      }
+      unsignedTx["DestinationTag"]?.let { lines += "Tag: $it" }
+    }
+    ChainKey.TON -> {
+      (unsignedTx["toAddress"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
+      (unsignedTx["amount"] as? String)?.toULongOrNull()?.let {
+        lines += "Amount: ${fmtAmt(it.toDouble() / 1e9)} TON"
+      }
+    }
+    ChainKey.TRON -> {
+      @Suppress("UNCHECKED_CAST")
+      val value = ((unsignedTx["raw_data"] as? Map<String, Any>)
+        ?.let { (it["contract"] as? List<Map<String, Any>>)?.firstOrNull() }
+        ?.let { it["parameter"] as? Map<String, Any> }
+        ?.let { it["value"] as? Map<String, Any> })
+      value?.let { v ->
+        (v["to_address"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
+        (v["amount"] as? Number)?.let { lines += "Amount: ${fmtAmt(it.toDouble() / 1e6)} TRX" }
+      }
+    }
+    ChainKey.SOLANA -> lines += "(Solana — details verified by the network)"
+    ChainKey.BITCOINCASH -> {}
+  }
+  return lines.joinToString("\n")
+}
+
+private fun txHexToDouble(hex: String): Double = try {
+  BigInteger(hex.removePrefix("0x").ifEmpty { "0" }, 16).toDouble()
+} catch (_: NumberFormatException) { 0.0 }
+
+private fun fmtAmt(value: Double): String =
+  "%.8f".format(value).trimEnd('0').trimEnd('.')
+
+private fun fmtAddr(addr: String): String = addr
 
 // Helpers
 
