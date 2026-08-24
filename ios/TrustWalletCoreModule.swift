@@ -10,8 +10,11 @@ public class TrustWalletCoreModule: Module {
     Name("TrustWalletCore")
 
     // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses }.
-    AsyncFunction("createWallet") { (strength: Int, passphrase: String) throws -> [String: Any] in
-      guard let wallet = HDWallet(strength: Int32(strength), passphrase: passphrase) else {
+    // No BIP-39 passphrase support: signTransaction always reconstructs the wallet with an
+    // empty passphrase, so accepting one here would derive addresses from a seed different
+    // from the one actually used to sign — always pass "" to stay consistent with that.
+    AsyncFunction("createWallet") { (strength: Int) throws -> [String: Any] in
+      guard let wallet = HDWallet(strength: Int32(strength), passphrase: "") else {
         throw Exception(name: "WalletError", description: "Failed to generate wallet")
       }
       do {
@@ -22,9 +25,9 @@ public class TrustWalletCoreModule: Module {
     }
 
     // One-time mnemonic exposure from JS, at import only — never retained after this call.
-    // Returns { walletId, addresses }.
-    AsyncFunction("importWallet") { (mnemonic: String, passphrase: String) throws -> [String: Any] in
-      guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: passphrase) else {
+    // Returns { walletId, addresses }. No BIP-39 passphrase support (see `createWallet`).
+    AsyncFunction("importWallet") { (mnemonic: String) throws -> [String: Any] in
+      guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: "") else {
         throw Exception(name: "InvalidMnemonic", description: "Invalid mnemonic phrase")
       }
       do {

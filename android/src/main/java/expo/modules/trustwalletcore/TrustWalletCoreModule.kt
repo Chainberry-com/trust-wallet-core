@@ -30,15 +30,18 @@ class TrustWalletCoreModule : Module() {
     Name("TrustWalletCore")
 
     // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses }.
-    AsyncFunction("createWallet") Coroutine { strength: Int, passphrase: String ->
-      val wallet = HDWallet(strength, passphrase)
+    // No BIP-39 passphrase support: signTransaction always reconstructs the wallet with an
+    // empty passphrase, so accepting one here would derive addresses from a seed different
+    // from the one actually used to sign — always pass "" to stay consistent with that.
+    AsyncFunction("createWallet") Coroutine { strength: Int ->
+      val wallet = HDWallet(strength, "")
       persistNewWallet(wallet)
     }
 
     // One-time mnemonic exposure from JS, at import only — never retained after this call.
-    // Returns { walletId, addresses }.
-    AsyncFunction("importWallet") Coroutine { mnemonic: String, passphrase: String ->
-      val wallet = HDWallet(mnemonic, passphrase) // throws on invalid mnemonic
+    // Returns { walletId, addresses }. No BIP-39 passphrase support (see `createWallet`).
+    AsyncFunction("importWallet") Coroutine { mnemonic: String ->
+      val wallet = HDWallet(mnemonic, "") // throws on invalid mnemonic
       persistNewWallet(wallet)
     }
 
