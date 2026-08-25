@@ -1,4 +1,5 @@
 import ExpoModulesCore
+import UIKit
 import WalletCore
 @preconcurrency import LocalAuthentication
 
@@ -71,6 +72,7 @@ public class TrustWalletCoreModule: Module {
       do {
         let id = try NativeWalletStore.validateWalletId(walletId)
         let chainKey = try ChainKey(fromJs: chain)
+        try await Self.confirmTransaction(chain: chainKey, unsignedTx: unsignedTx)
         let context = try await Self.authenticatedContext(reason: "Sign transaction")
         let mnemonic = try NativeWalletStore.loadMnemonic(walletId: id, context: context)
         guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: "") else {
@@ -98,6 +100,35 @@ public class TrustWalletCoreModule: Module {
   }
 
   // MARK: - Helpers
+
+  /// Presents a native UIAlertController showing decoded tx details (chain, recipient, amount,
+  /// fee). The user must tap "Confirm & Sign" before biometric auth fires — this is the only
+  /// place in the native module where informed consent is collected.
+  private static func confirmTransaction(chain: ChainKey, unsignedTx: [String: Any]) async throws {
+    let message = ChainSigner.buildSummary(chain: chain, unsignedTx: unsignedTx)
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+      DispatchQueue.main.async {
+        let scene = UIApplication.shared.connectedScenes
+          .filter({ $0.activationState == .foregroundActive })
+          .compactMap({ $0 as? UIWindowScene })
+          .first
+        var rootVC = scene?.windows.first(where: { $0.isKeyWindow })?.rootViewController
+        while let presented = rootVC?.presentedViewController { rootVC = presented }
+        guard let topVC = rootVC else {
+          continuation.resume(throwing: Exception(name: "NoViewController", description: "Cannot present confirmation"))
+          return
+        }
+        let alert = UIAlertController(title: "Confirm Transaction", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+          continuation.resume(throwing: Exception(name: "UserCancelled", description: "Transaction cancelled by user"))
+        })
+        alert.addAction(UIAlertAction(title: "Confirm & Sign", style: .default) { _ in
+          continuation.resume(returning: ())
+        })
+        topVC.present(alert, animated: true)
+      }
+    }
+  }
 
   private static func persistNewWallet(wallet: HDWallet) throws -> [String: Any] {
     let walletId = UUID().uuidString

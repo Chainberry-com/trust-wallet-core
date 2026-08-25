@@ -17,6 +17,21 @@ enum ChainKey: String, CaseIterable {
     self = key
   }
 
+  var symbol: String {
+    switch self {
+    case .ethereum: return "ETH"
+    case .bnb:      return "BNB"
+    case .polygon:  return "POL"
+    case .solana:   return "SOL"
+    case .tron:     return "TRX"
+    case .ton:      return "TON"
+    case .bitcoin:  return "BTC"
+    case .bitcoincash: return "BCH"
+    case .litecoin: return "LTC"
+    case .xrp:      return "XRP"
+    }
+  }
+
   // Polygon shares Ethereum's secp256k1 key/address (same BIP44 path) — no distinct CoinType.
   var coinType: CoinType {
     switch self {
@@ -344,6 +359,77 @@ enum ChainSigner {
     }
     return ChainSigner.Result(signedTx: output.encoded, meta: ["txHash": output.hash.hexString])
   }
+
+  // MARK: - Transaction summary for native confirmation UI
+
+  static func buildSummary(chain: ChainKey, unsignedTx: [String: Any]) -> String {
+    var lines = ["Network: \(chain.rawValue.uppercased())"]
+    switch chain {
+    case .ethereum, .bnb, .polygon:
+      if let to = unsignedTx["to"] as? String { lines.append("To: \(fmtAddr(to))") }
+      let val_ = txHexToDouble((unsignedTx["valueHex"] as? String) ?? "0")
+      lines.append("Amount: \(fmtAmt(val_ / 1e18)) \(chain.symbol)")
+      let gasLimit = txHexToDouble((unsignedTx["gasLimitHex"] as? String) ?? "0")
+      let gasPrice = txHexToDouble(
+        (unsignedTx["gasPriceHex"] as? String) ?? (unsignedTx["maxFeePerGasHex"] as? String) ?? "0"
+      )
+      let fee = gasLimit * gasPrice
+      if fee > 0 { lines.append("Max fee: \(fmtAmt(fee / 1e18)) \(chain.symbol)") }
+
+    case .bitcoin, .litecoin:
+      if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+      if let sats = (unsignedTx["sendAmountSats"] as? String).flatMap(Int64.init) {
+        lines.append("Amount: \(fmtAmt(Double(sats) / 1e8)) \(chain.symbol)")
+      }
+
+    case .xrp:
+      if let dest = unsignedTx["Destination"] as? String { lines.append("To: \(fmtAddr(dest))") }
+      if let drops = (unsignedTx["Amount"] as? String).flatMap(Int64.init) {
+        lines.append("Amount: \(fmtAmt(Double(drops) / 1_000_000)) XRP")
+      }
+      if let feeDrops = (unsignedTx["Fee"] as? String).flatMap(Int64.init) {
+        lines.append("Fee: \(fmtAmt(Double(feeDrops) / 1_000_000)) XRP")
+      }
+      if let tag = unsignedTx["DestinationTag"] { lines.append("Tag: \(tag)") }
+
+    case .ton:
+      if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+      if let nano = (unsignedTx["amount"] as? String).flatMap(UInt64.init) {
+        lines.append("Amount: \(fmtAmt(Double(nano) / 1e9)) TON")
+      }
+
+    case .tron:
+      if let rawData = unsignedTx["raw_data"] as? [String: Any],
+         let contracts = rawData["contract"] as? [[String: Any]],
+         let param = contracts.first?["parameter"] as? [String: Any],
+         let value = param["value"] as? [String: Any] {
+        if let to = value["to_address"] as? String { lines.append("To: \(fmtAddr(to))") }
+        if let amount = value["amount"] as? Int { lines.append("Amount: \(fmtAmt(Double(amount) / 1e6)) TRX") }
+      }
+
+    case .solana:
+      lines.append("(Solana — details verified by the network)")
+
+    case .bitcoincash:
+      break
+    }
+    return lines.joined(separator: "\n")
+  }
+
+  private static func txHexToDouble(_ hex: String) -> Double {
+    let s = hex.hasPrefix("0x") ? String(hex.dropFirst(2)) : hex
+    if let v = UInt64(s, radix: 16) { return Double(v) }
+    return hexData(s)?.reduce(0.0) { $0 * 256 + Double($1) } ?? 0
+  }
+
+  private static func fmtAmt(_ value: Double) -> String {
+    var s = String(format: "%.8f", value)
+    while s.hasSuffix("0") { s.removeLast() }
+    if s.hasSuffix(".") { s.removeLast() }
+    return s
+  }
+
+  private static func fmtAddr(_ addr: String) -> String { addr }
 
   // MARK: - Helpers
 

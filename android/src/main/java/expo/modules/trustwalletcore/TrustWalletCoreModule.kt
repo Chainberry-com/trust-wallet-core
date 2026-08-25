@@ -1,12 +1,16 @@
 package expo.modules.trustwalletcore
 
+import android.app.AlertDialog
 import androidx.fragment.app.FragmentActivity
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import kotlinx.coroutines.suspendCancellableCoroutine
 import wallet.core.jni.HDWallet
 import java.util.UUID
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 // Mnemonic/private-key material never crosses back to JS except `exportMnemonic` — an
 // explicit, biometric/device-credential-gated backup flow. Every other method returns only
@@ -70,6 +74,7 @@ class TrustWalletCoreModule : Module() {
     AsyncFunction("signTransaction") Coroutine { walletId: String, chain: String, unsignedTx: Map<String, Any> ->
       val id = NativeWalletStore.validateWalletId(walletId)
       val chainKey = ChainKey.fromJs(chain)
+      confirmTransaction(chainKey, unsignedTx)
       val cipher = NativeWalletStore.authenticateForExistingWallet(activity, context, id, "Sign transaction")
       val mnemonic = NativeWalletStore.loadMnemonic(context, id, cipher)
       val wallet = HDWallet(mnemonic, "")
@@ -84,6 +89,31 @@ class TrustWalletCoreModule : Module() {
       val id = NativeWalletStore.validateWalletId(walletId)
       val cipher = NativeWalletStore.authenticateForExistingWallet(activity, context, id, "Reveal recovery phrase")
       NativeWalletStore.loadMnemonic(context, id, cipher)
+    }
+  }
+
+  /// Shows a native AlertDialog with decoded tx details before biometric auth fires.
+  /// The user must tap "Confirm & Sign" — cancelling throws UserCancelled.
+  private suspend fun confirmTransaction(chain: ChainKey, unsignedTx: Map<String, Any>) {
+    val message = ChainSigner.buildSummary(chain, unsignedTx)
+    suspendCancellableCoroutine<Unit> { continuation ->
+      activity.runOnUiThread {
+        AlertDialog.Builder(activity)
+          .setTitle("Confirm Transaction")
+          .setMessage(message)
+          .setPositiveButton("Confirm & Sign") { _, _ -> continuation.resume(Unit) }
+          .setNegativeButton("Cancel") { _, _ ->
+            continuation.resumeWithException(
+              CodedException("UserCancelled", "Transaction cancelled by user", null)
+            )
+          }
+          .setOnCancelListener {
+            continuation.resumeWithException(
+              CodedException("UserCancelled", "Transaction cancelled by user", null)
+            )
+          }
+          .show()
+      }
     }
   }
 
