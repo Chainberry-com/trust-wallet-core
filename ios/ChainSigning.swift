@@ -5,6 +5,7 @@ import WalletCore
 // All chains this module derives addresses for / signs transactions for.
 enum ChainKey: String, CaseIterable {
   case ethereum, bnb, polygon
+  case avax, base, arbitrum, optimism, sonic
   case solana
   case tron, ton
   case bitcoin, bitcoincash, litecoin
@@ -17,10 +18,10 @@ enum ChainKey: String, CaseIterable {
     self = key
   }
 
-  // Polygon shares Ethereum's secp256k1 key/address (same BIP44 path) — no distinct CoinType.
+  // All EVM chains share Ethereum's secp256k1 key/address (BIP44 slip44 = 60) — no distinct CoinType.
   var coinType: CoinType {
     switch self {
-    case .ethereum, .polygon: return .ethereum
+    case .ethereum, .polygon, .avax, .base, .arbitrum, .optimism, .sonic: return .ethereum
     case .bnb: return .smartChain
     case .solana: return .solana
     case .tron: return .tron
@@ -41,7 +42,7 @@ enum ChainSigner {
 
   static func sign(chain: ChainKey, wallet: HDWallet, unsignedTx: [String: Any]) throws -> Result {
     switch chain {
-    case .ethereum, .bnb, .polygon:
+    case .ethereum, .bnb, .polygon, .avax, .base, .arbitrum, .optimism, .sonic:
       return Result(signedTx: try signEvm(wallet: wallet, coin: chain.coinType, txParams: unsignedTx), meta: nil)
     case .solana:
       return Result(signedTx: try signSolana(wallet: wallet, txParams: unsignedTx), meta: nil)

@@ -24,8 +24,13 @@ class ChainSigningException(message: String) : Exception(message)
 enum class ChainKey(val coinType: CoinType) {
   ETHEREUM(CoinType.ETHEREUM),
   BNB(CoinType.SMARTCHAIN),
-  // Polygon shares Ethereum's secp256k1 key/address (same BIP44 path) — no distinct CoinType.
+  // All EVM chains share Ethereum's secp256k1 key/address (BIP44 slip44 = 60) — no distinct CoinType.
   POLYGON(CoinType.ETHEREUM),
+  AVAX(CoinType.ETHEREUM),
+  BASE(CoinType.ETHEREUM),
+  ARBITRUM(CoinType.ETHEREUM),
+  OPTIMISM(CoinType.ETHEREUM),
+  SONIC(CoinType.ETHEREUM),
   SOLANA(CoinType.SOLANA),
   TRON(CoinType.TRON),
   TON(CoinType.TON),
@@ -45,7 +50,8 @@ data class ChainSignResult(val signedTx: String, val meta: Map<String, Any>?)
 
 object ChainSigner {
   fun sign(chain: ChainKey, wallet: HDWallet, unsignedTx: Map<String, Any>): ChainSignResult = when (chain) {
-    ChainKey.ETHEREUM, ChainKey.BNB, ChainKey.POLYGON ->
+    ChainKey.ETHEREUM, ChainKey.BNB, ChainKey.POLYGON,
+    ChainKey.AVAX, ChainKey.BASE, ChainKey.ARBITRUM, ChainKey.OPTIMISM, ChainKey.SONIC ->
       ChainSignResult(signEvm(wallet, chain.coinType, unsignedTx), null)
     ChainKey.SOLANA -> ChainSignResult(signSolana(wallet, unsignedTx), null)
     ChainKey.BITCOIN, ChainKey.LITECOIN -> ChainSignResult(signUtxo(wallet, chain.coinType, unsignedTx), null)

@@ -10,7 +10,12 @@ import { requireNativeModule } from "expo-modules-core";
 export type Chain =
   | "ethereum"
   | "bnb"
-  | "polygon" // shares Ethereum's secp256k1 key/address — same BIP44 path, no distinct derivation
+  | "polygon"   // shares Ethereum's secp256k1 key/address — same BIP44 path, no distinct derivation
+  | "avax"      // Avalanche C-Chain — EVM, same key derivation as Ethereum
+  | "base"      // Base — EVM L2, same key derivation as Ethereum
+  | "arbitrum"  // Arbitrum One — EVM L2, same key derivation as Ethereum
+  | "optimism"  // Optimism — EVM L2, same key derivation as Ethereum
+  | "sonic"     // Sonic — EVM, same key derivation as Ethereum
   | "solana"
   | "tron"
   | "ton"
