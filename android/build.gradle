@@ -13,11 +13,15 @@ applyKotlinExpoModulesCorePlugin()
 
 android {
   namespace 'expo.modules.trustwalletcore'
-  compileSdkVersion 35
+  compileSdkVersion 36
 
   defaultConfig {
     minSdkVersion 24
-    targetSdkVersion 35
+    targetSdkVersion 36
+    // Without this, AGP defaults to the legacy android.test.InstrumentationTestRunner, which
+    // cannot discover @RunWith(AndroidJUnit4::class)-annotated tests at all (connectedAndroidTest
+    // silently reports "0 tests"/"No tests found" instead of running AddressDerivationConformanceTest).
+    testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
   }
 
   compileOptions {

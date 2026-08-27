@@ -1,0 +1,131 @@
+{
+  "_note": "Byte-for-byte signed-output vectors, verified against real on-device Trust Wallet Core 4.1.19 (the pinned version), via the Android instrumented test SigningConformanceTest.kt, run 2026-08-27 on an emulator. Every vector calls ChainSigner.sign() — the exact code path TrustWalletCoreModule.kt uses in production — with a fixed, deterministic (but not necessarily broadcast-valid: fake txids/blockhash/etc.) unsignedTx. Companion to conformance/address-derivation-vectors.json (same test mnemonic/empty passphrase). bitcoincash is absent — sending is unsupported on both platforms (derivation-only, see that fixture). This pass verified Android only; see address-derivation-vectors.json's _note and README.md's Security model section for the iOS gap.",
+  "testMnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "testPassphrase": "",
+  "signingVectors": [
+    {
+      "chain": "ethereum",
+      "_note": "Legacy gasPriceHex path in signEvm (as opposed to polygon's EIP-1559 path below) — self-send of 1 ETH to the wallet's own address, fixed nonce/gas.",
+      "unsignedTx": {
+        "to": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+        "chainId": 1,
+        "nonce": 0,
+        "gasLimitHex": "5208",
+        "valueHex": "de0b6b3a7640000",
+        "gasPriceHex": "4a817c800"
+      },
+      "expectedSignedTx": "0xf86c808504a817c800825208949858effd232b4033e47d90003d41ec34ecaeda94880de0b6b3a76400008026a0b7cca5f69561cd482cec4e692bd2da17d9eb1d6b3a83fe3f7f11d117de99ca97a00ad0dc153460e39b355c226a2744fc2926f84b95b89c954551571f1bbc251478",
+      "expectedMeta": null,
+      "status": "verified"
+    },
+    {
+      "chain": "polygon",
+      "_note": "EIP-1559 maxFeePerGasHex/maxPriorityFeePerGasHex path in signEvm — a genuinely different branch from ethereum's legacy path above, worth its own vector. bnb needs no separate vector: same CoinType/code path as ethereum (see address-derivation-vectors.json).",
+      "unsignedTx": {
+        "to": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+        "chainId": 137,
+        "nonce": 0,
+        "gasLimitHex": "5208",
+        "valueHex": "de0b6b3a7640000",
+        "maxFeePerGasHex": "9502f9000",
+        "maxPriorityFeePerGasHex": "3b9aca00"
+      },
+      "expectedSignedTx": "0x02f874818980843b9aca008509502f9000825208949858effd232b4033e47d90003d41ec34ecaeda94880de0b6b3a764000080c001a038b5c72ee38aa18607462b80ab0cb170a8d4df1c4090ac49acd41d6b4b0f9acca05bdee390ee8a50ff569f55d408371213df72a3065902b07317289b39788cb434",
+      "expectedMeta": null,
+      "status": "verified"
+    },
+    {
+      "chain": "bitcoin",
+      "_note": "Self-send: toAddress/changeAddress are the wallet's own bitcoin address (see address-derivation-vectors.json). scriptPubKeyHex was computed via BitcoinScript.lockScriptForAddress() on-device (see SigningConformanceTest.kt) rather than hand-derived from bech32, so it's guaranteed to match this wallet's real P2WPKH lock script. txIdHex/vout/amounts are fixed and NOT a real UTXO — never broadcast this.",
+      "unsignedTx": {
+        "toAddress": "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",
+        "changeAddress": "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",
+        "sendAmountSats": "50000",
+        "changeAmountSats": "40000",
+        "satsPerByte": 10,
+        "inputs": [
+          {
+            "txIdHex": "0000000000000000000000000000000000000000000000000000000000000000",
+            "vout": 0,
+            "amountSats": "100000",
+            "scriptPubKeyHex": "0014c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e2"
+          }
+        ]
+      },
+      "expectedSignedTx": "0100000000010100000000000000000000000000000000000000000000000000000000000000000000000000000000000250c3000000000000160014c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e2cebd000000000000160014c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e20247304402201e8f3663c97712bbf662c96df532e701ca9b660b507ab170d7b4ffbd966d4be0022033bd537c7720b1e7be2b7663d1a0adcbe565ff18a25794aec828015529ab80e101210330d54fd0dd420a6e5f8d3624f5f3482cae350f79d5f0753bf5beef9c2d91af3c00000000",
+      "expectedMeta": null,
+      "status": "verified"
+    },
+    {
+      "chain": "litecoin",
+      "_note": "Same shape/code path as bitcoin (signUtxo), different CoinType/address — self-send to the wallet's own litecoin address.",
+      "unsignedTx": {
+        "toAddress": "ltc1qjmxnz78nmc8nq77wuxh25n2es7rzm5c2rkk4wh",
+        "changeAddress": "ltc1qjmxnz78nmc8nq77wuxh25n2es7rzm5c2rkk4wh",
+        "sendAmountSats": "50000",
+        "changeAmountSats": "40000",
+        "satsPerByte": 10,
+        "inputs": [
+          {
+            "txIdHex": "0000000000000000000000000000000000000000000000000000000000000000",
+            "vout": 0,
+            "amountSats": "100000",
+            "scriptPubKeyHex": "001496cd3178f3de0f307bcee1aeaa4d5987862dd30a"
+          }
+        ]
+      },
+      "expectedSignedTx": "0100000000010100000000000000000000000000000000000000000000000000000000000000000000000000000000000250c300000000000016001496cd3178f3de0f307bcee1aeaa4d5987862dd30acebd00000000000016001496cd3178f3de0f307bcee1aeaa4d5987862dd30a0248304502210093a73dec624132e9ea3d1a629c0c08be77be68416b0f99cbeb23381967ce8c560220385912e0b0835bcd1dd844bae68e4df208af8b07b095d5ac5ce6cd4407a27a85012102e49c9b9b5d0f127235dc26a0c252814c52fb333d651a946773f59d72c2da990400000000",
+      "expectedMeta": null,
+      "status": "verified"
+    },
+    {
+      "chain": "xrp",
+      "_note": "Self-send: Account and Destination are both the wallet's own xrp address.",
+      "unsignedTx": {
+        "Account": "rHsMGQEkVNJmpGWs8XUBoTBiAAbwxZN5v3",
+        "Destination": "rHsMGQEkVNJmpGWs8XUBoTBiAAbwxZN5v3",
+        "Amount": "1000000",
+        "Fee": "12",
+        "Sequence": 1,
+        "LastLedgerSequence": 100
+      },
+      "expectedSignedTx": "12000022000000002400000001201b000000646140000000000f424068400000000000000c7321031d68bc1a142e6766b2bdfb006ccfe135ef2e0e2e94abb5cf5c9ab6104776fbae7446304402207fb80c118799a9b3d4dad6e91ad1b8f0c5c9d189a0bcdaf50e823ea44f8044e70220422f638bf4b4e634cb39a4250cf72513d5e3c7e810a13c2f35b5df54b02dc7c98114aff3c2e33458b30714ca16ffee19952dd35c17c88314aff3c2e33458b30714ca16ffee19952dd35c17c8",
+      "expectedMeta": null,
+      "status": "verified"
+    },
+    {
+      "chain": "ton",
+      "_note": "NOT byte-reproducible: signTon() embeds a wall-clock expireAt = now + 600s into the signed BOC, so both the output and meta.txHash (which hashes the BOC) differ every run — confirmed by harvesting this vector twice and getting two different, both-valid outputs. There is deliberately no expectedSignedTx/expectedMeta here; SigningConformanceTest.kt's tonVectorIsWellFormed() instead checks that signing succeeds, the output looks like a well-formed BOC ('te6cc...' prefix), and meta.txHash is present with the right length. This is a real constraint of the production signing code, not a gap in this fixture.",
+      "unsignedTx": {
+        "toAddress": "UQAzWZa6nM5mJev91wGc7VCSfBoIsYRqKJpV78N8Add9-RKY",
+        "amount": "1000000000",
+        "seqno": 1,
+        "memoId": "conformance-test"
+      },
+      "expectedSignedTx": null,
+      "expectedMeta": null,
+      "status": "verified-non-deterministic"
+    },
+    {
+      "chain": "tron",
+      "_note": "signTron() signs the raw txID digest directly (direct-sign path) and reassembles {...originalTx, signature} in app code — see ChainSigning.kt's signTron doc comment. IMPORTANT DISCOVERY: an all-zero 32-byte digest degenerates silently to an EMPTY signature (no error thrown) in this path — this fixture deliberately uses a non-trivial fake digest instead to get a real signature; do not 'simplify' this back to an all-zero txID. iOS DIVERGENCE, NOT RESOLVED IN THIS PASS (no Swift toolchain available): iOS's signTron sets TronSigningInput.rawJson to the full unsigned tx and returns wallet-core's own output.json reconstruction, instead of Android's txId-only input + manual JSON reassembly. Before this vector can be treated as verified cross-platform, an iOS engineer must run this exact unsignedTx (mnemonic/passphrase above) through the iOS path and confirm the embedded signature hex matches Android's expectedSignedTx's signature field exactly (same digest+key -> same signature is non-negotiable; a mismatch is a real bug) and that the resulting JSON is still consumable by tronWeb.trx.sendRawTransaction.",
+      "unsignedTx": {
+        "txID": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "expectedSignedTx": "{\"txID\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"signature\":[\"4b63d125c56637e9f09d9578bf9fbf30e0e6796085bb0fe8aa7c466b2ae9bc690a26d26fe36ff0d42d416ce76b70b486c50c0294b50d5a6e9871d2f3a7ebd28901\"]}",
+      "expectedMeta": null,
+      "status": "verified-android-only",
+      "platform": "android"
+    },
+    {
+      "chain": "solana",
+      "_note": "unsignedTxBase64 was generated with @solana/web3.js (Node, one-off script — see this file's git history/PR description for how): feePayer/from = this wallet's own solana address, to = the System Program id (32 zero bytes, a fixed valid pubkey used purely as a deterministic recipient), recentBlockhash = the same all-zero value (never broadcast, only needs to be shape-valid base58 for wallet-core's TransactionDecoder). signSolana() round-trips this through SolanaTransaction.updateBlockhashAndSign with the same blockhash (see ChainSigning.kt doc comment) — no fresher blockhash is available or needed for a non-broadcast conformance check.",
+      "unsignedTx": {
+        "unsignedTxBase64": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAC6bYGKEG7l3rSHeceyWGQBjPCbyE4TgFbAUpjemFJlUcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQECAAEMAgAAAEBCDwAAAAAA"
+      },
+      "expectedSignedTx": "Aa+eJgDHJo2f9vGrz1EpPPnfGWcZoySFIEw0sS7OVvYiF4U421YCQqLme/uESu3SLan0AM6xblAfUgYlM28StQcBAAAC6bYGKEG7l3rSHeceyWGQBjPCbyE4TgFbAUpjemFJlUcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQECAAEMAgAAAEBCDwAAAAAA",
+      "expectedMeta": null,
+      "status": "verified"
+    }
+  ]
+}

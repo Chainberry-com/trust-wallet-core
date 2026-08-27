@@ -1,60 +1,62 @@
 {
-  "_note": "Vectors verified against Trust Wallet Core 4.1.19 (the pinned version on both platforms). Test mnemonic is the BIP39 standard test vector — never use with real funds. Add a signing-vectors.json alongside this file when byte-for-byte signed-output parity is established per chain.",
+  "_note": "Verified against real on-device Trust Wallet Core 4.1.19 (the pinned version on both platforms), via the Android instrumented test AddressDerivationConformanceTest.kt, run 2026-08-27 on an emulator. Independently cross-checked with the WASM build (@trustwallet/wallet-core 3.3.3, run standalone in Node) as a second data point — the two agree on all chains except ton (see that entry's _note); on-device 4.1.19 is authoritative on any disagreement, since that's what the app actually ships. Test mnemonic is the BIP39 standard test vector — never use with real funds. This pass verified Android only: no Swift/Xcode toolchain was available to run the equivalent check on iOS (ChainKey.coinType maps identically on both platforms, so the derivation itself should match, but that has not been independently confirmed on-device for iOS — see README.md's Security model section). See conformance/signing-vectors.json for byte-for-byte signed-output vectors.",
   "testMnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
   "testPassphrase": "",
   "addressDerivation": [
     {
       "chain": "ethereum",
-      "expected": "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F",
-      "status": "verified"
+      "expected": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+      "status": "verified",
+      "_note": "Corrected in this pass — the previous 'verified' value (0x9d8A62f6...) was never actually checked against real WalletCore output (the instrumented test that should have caught this had never successfully run; see AddressDerivationConformanceTest.kt's header comment for why)."
     },
     {
       "chain": "bnb",
-      "expected": "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F",
+      "expected": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
       "status": "verified",
-      "_note": "BNB Smart Chain shares CoinType.ETHEREUM (same secp256k1 key, same BIP44 path m/44'/60'/0'/0/0)"
+      "_note": "BNB Smart Chain shares CoinType.ETHEREUM (same secp256k1 key, same BIP44 path m/44'/60'/0'/0/0). Corrected alongside ethereum, see that entry's _note."
     },
     {
       "chain": "polygon",
-      "expected": "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F",
+      "expected": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
       "status": "verified",
-      "_note": "Polygon shares CoinType.ETHEREUM (same secp256k1 key, same BIP44 path m/44'/60'/0'/0/0)"
+      "_note": "Polygon shares CoinType.ETHEREUM (same secp256k1 key, same BIP44 path m/44'/60'/0'/0/0). Corrected alongside ethereum, see that entry's _note."
     },
     {
       "chain": "bitcoin",
-      "expected": null,
-      "status": "pending-verification",
-      "_note": "Run AddressDerivationConformanceTest with status=pending to print the actual 4.1.19 address, then set expected and change status to verified"
+      "expected": "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",
+      "status": "verified"
     },
     {
       "chain": "litecoin",
-      "expected": null,
-      "status": "pending-verification"
+      "expected": "ltc1qjmxnz78nmc8nq77wuxh25n2es7rzm5c2rkk4wh",
+      "status": "verified"
     },
     {
       "chain": "xrp",
-      "expected": null,
-      "status": "pending-verification"
+      "expected": "rHsMGQEkVNJmpGWs8XUBoTBiAAbwxZN5v3",
+      "status": "verified"
     },
     {
       "chain": "tron",
-      "expected": null,
-      "status": "pending-verification"
+      "expected": "TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH",
+      "status": "verified"
     },
     {
       "chain": "ton",
-      "expected": null,
-      "status": "pending-verification"
+      "expected": "UQAzWZa6nM5mJev91wGc7VCSfBoIsYRqKJpV78N8Add9-RKY",
+      "status": "verified",
+      "_note": "Non-bounceable (UQ...) — WalletCore 4.1.19's on-device default for this CoinType. The WASM cross-check (@trustwallet/wallet-core 3.3.3) derives the identical underlying public-key hash but defaults to the bounceable (EQ...) address-flag encoding instead (EQAzWZa6nM5mJev91wGc7VCSfBoIsYRqKJpV78N8Add9-U9d) — a version/binding difference in default address flags, not a key-derivation discrepancy. On-device 4.1.19 is authoritative since that's what the app actually ships; worth being aware of if this fixture is ever cross-checked again with a newer/different wallet-core binding."
     },
     {
       "chain": "solana",
-      "expected": null,
-      "status": "pending-verification"
+      "expected": "GjJyeC1r2RgkuoCWMyPYkCWSGSGLcz266EaAkLA27AhL",
+      "status": "verified"
     },
     {
       "chain": "bitcoincash",
-      "expected": null,
-      "status": "pending-verification"
+      "expected": "bitcoincash:qqyx49mu0kkn9ftfj6hje6g2wfer34yfnq5tahq3q6",
+      "status": "verified",
+      "_note": "Derivation-only — BCH sending is unsupported on both platforms, so there is no corresponding signing vector for this chain."
     }
   ]
 }
