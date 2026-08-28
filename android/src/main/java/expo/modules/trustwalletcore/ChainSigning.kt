@@ -24,6 +24,15 @@ import java.math.BigInteger
 
 class ChainSigningException(message: String) : Exception(message)
 
+// Gated on BuildConfig.DEBUG (false in release builds) rather than a bare Log.d call: UTXO
+// txids/amounts/addresses/fees are financial metadata, and android.util.Log.d writes to logcat
+// unconditionally — there's no default ProGuard/R8 rule stripping it, so an ungated call would
+// genuinely ship in production, not just debug. `msg` is a lambda so the (string-templated)
+// message is never even built in release, not just skipped on write.
+private inline fun debugLog(msg: () -> String) {
+  if (BuildConfig.DEBUG) Log.d("ChainSigning", msg())
+}
+
 // All chains this module derives addresses for / signs transactions for.
 enum class ChainKey(val coinType: CoinType) {
   ETHEREUM(CoinType.ETHEREUM),
@@ -224,13 +233,13 @@ object ChainSigner {
     val satsPerByte = (unsignedTx["satsPerByte"] as? Number)?.toLong() ?: throw ChainSigningException("Missing satsPerByte")
     val inputs = unsignedTx["inputs"] as? List<Map<String, Any>> ?: throw ChainSigningException("Missing inputs")
 
-    Log.d("ChainSigning", "signUtxo: parsing ${inputs.size} UTXOs")
+    debugLog { "signUtxo: parsing ${inputs.size} UTXOs" }
     val utxos = inputs.map { entry ->
       val txIdHex = entry["txIdHex"] as? String ?: throw ChainSigningException("Invalid UTXO entry: missing txIdHex, keys=${entry.keys}")
       val vout = (entry["vout"] as? Number)?.toInt() ?: throw ChainSigningException("Invalid UTXO entry: missing vout")
       val amount = (entry["amountSats"] as? String)?.toLong() ?: throw ChainSigningException("Invalid UTXO entry: missing amountSats, type=${entry["amountSats"]?.javaClass?.name}")
       val scriptHex = entry["scriptPubKeyHex"] as? String ?: throw ChainSigningException("Invalid UTXO entry: missing scriptPubKeyHex")
-      Log.d("ChainSigning", "signUtxo: UTXO txid=$txIdHex vout=$vout amount=$amount")
+      debugLog { "signUtxo: UTXO txid=$txIdHex vout=$vout amount=$amount" }
 
       // On-chain/explorer txid hex is displayed big-endian; wallet-core's OutPoint.hash wants
       // the reversed (little-endian, internal wire-format) byte order.
@@ -246,7 +255,7 @@ object ChainSigner {
       }.build()
     }
 
-    Log.d("ChainSigning", "signUtxo: building SigningInput toAddress=$toAddress sats=$sendAmountSats fee=$satsPerByte")
+    debugLog { "signUtxo: building SigningInput toAddress=$toAddress sats=$sendAmountSats fee=$satsPerByte" }
     val input = Bitcoin.SigningInput.newBuilder().apply {
       this.hashType = 1 // SIGHASH_ALL — stable Bitcoin protocol constant, not a wallet-core-specific value
       this.amount = sendAmountSats
@@ -259,9 +268,9 @@ object ChainSigner {
       this.addAllUtxo(utxos)
     }.build()
 
-    Log.d("ChainSigning", "signUtxo: calling AnySigner.sign coin=${coin.name}")
+    debugLog { "signUtxo: calling AnySigner.sign coin=${coin.name}" }
     val output = AnySigner.sign(input, coin, Bitcoin.SigningOutput.parser())
-    Log.d("ChainSigning", "signUtxo: AnySigner.sign done error=${output.error} msg=${output.errorMessage}")
+    debugLog { "signUtxo: AnySigner.sign done error=${output.error} msg=${output.errorMessage}" }
     if (output.error != Common.SigningError.OK) throw ChainSigningException("Signing failed: ${output.errorMessage}")
     return output.encoded.toByteArray().toHex()
   }
