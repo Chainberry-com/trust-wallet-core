@@ -2,6 +2,7 @@ package expo.modules.trustwalletcore
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import wallet.core.jni.CoinType
@@ -72,6 +73,24 @@ class AddressDerivationConformanceTest {
       val actual = wallet.getAddressForCoin(coin)
       assertEquals("address mismatch for coin=${coin.name}", expected, actual)
     }
+  }
+
+  // Regression test for a real bug: ChainSigner.addressForChain originally derived Litecoin's
+  // and Bitcoin Cash's hand-rolled testnet address from the identical path m/44'/1'/0'/0/0.
+  // BIP32 derivation only depends on (seed, path, curve) — CoinType alone doesn't perturb it
+  // when the literal path and curve (secp256k1 for both) are the same — so LTC and BCH silently
+  // derived the *same* key, and therefore the same address. Fixed by using each coin's own
+  // SLIP-44 index as the account (3rd) path component (see ChainSigner.utxoTestnetPath).
+  @Test
+  fun testnetAddressesAreDistinctPerChain() {
+    val wallet = HDWallet(MNEMONIC, "")
+    val btc = ChainSigner.addressForChain(wallet, ChainKey.BITCOIN, isTestnet = true)
+    val ltc = ChainSigner.addressForChain(wallet, ChainKey.LITECOIN, isTestnet = true)
+    val bch = ChainSigner.addressForChain(wallet, ChainKey.BITCOINCASH, isTestnet = true)
+    println("[AddressDerivationConformanceTest] testnet: BTC=$btc LTC=$ltc BCH=$bch")
+    assertNotEquals("BTC/LTC testnet addresses must not collide", btc, ltc)
+    assertNotEquals("BTC/BCH testnet addresses must not collide", btc, bch)
+    assertNotEquals("LTC/BCH testnet addresses must not collide", ltc, bch)
   }
 
   @Test

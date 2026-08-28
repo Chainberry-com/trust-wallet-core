@@ -142,7 +142,7 @@ class SigningConformanceTest {
     val lines = vectors().map { (chain, pair) ->
       val (chainKey, unsignedTx) = pair
       val result = try {
-        ChainSigner.sign(chainKey, wallet, unsignedTx)
+        ChainSigner.sign(chainKey, wallet, unsignedTx, isTestnet = false)
       } catch (e: Exception) {
         return@map "  $chain -> ERROR: ${e.message}"
       }
@@ -162,7 +162,7 @@ class SigningConformanceTest {
     for ((chain, pair) in vectors()) {
       val expected = EXPECTED[chain] ?: continue
       val (chainKey, unsignedTx) = pair
-      val actual = ChainSigner.sign(chainKey, wallet, unsignedTx).signedTx
+      val actual = ChainSigner.sign(chainKey, wallet, unsignedTx, isTestnet = false).signedTx
       assertEquals("signed output mismatch for chain=$chain", expected, actual)
     }
   }
@@ -176,7 +176,7 @@ class SigningConformanceTest {
   fun tonVectorIsWellFormed() {
     val wallet = HDWallet(MNEMONIC, "")
     val (chainKey, unsignedTx) = vectors().getValue("ton")
-    val result = ChainSigner.sign(chainKey, wallet, unsignedTx)
+    val result = ChainSigner.sign(chainKey, wallet, unsignedTx, isTestnet = false)
     assert(result.signedTx.startsWith("te6cc")) {
       "TON signed output doesn't look like a BOC (expected te6cc... prefix): ${result.signedTx}"
     }

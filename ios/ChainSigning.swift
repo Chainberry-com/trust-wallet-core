@@ -54,14 +54,83 @@ enum ChainSigner {
     let meta: [String: Any]?
   }
 
-  static func sign(chain: ChainKey, wallet: HDWallet, unsignedTx: [String: Any]) throws -> Result {
+  // SLIP-44 dedicates coin_type 1' to "testnet" for every coin — so a shared literal path
+  // would make Litecoin and Bitcoin Cash derive the *same* key (BIP32 derivation only depends
+  // on (seed, path, curve), and CoinType alone doesn't perturb it when the path and curve —
+  // secp256k1 for both — are identical). Disambiguate by using each coin's own SLIP-44 index
+  // as the account (3rd) path component. `purpose` follows the usual BIP44/49/84 convention
+  // (44' legacy, 84' native segwit) matching the address style each coin actually gets below.
+  private static func utxoTestnetPath(_ chain: ChainKey, purpose: Int) -> String {
+    // .rawValue is this coin's SLIP-44 id (same value `signUtxo` already sends as
+    // `input.coinType = coin.rawValue` below) — reusing it here instead of an unverified
+    // `.slip44Id` accessor keeps this to APIs already proven to exist in this binding.
+    "m/\(purpose)'/1'/\(chain.coinType.rawValue)'/0/0"
+  }
+
+  private static let litecoinTestnetHRP = "tltc"
+
+  // Bitcoin Cash testnet legacy P2PKH version byte (0x6F) — same value Bitcoin/Litecoin
+  // testnets use for their base58 legacy prefix. BCH has no bech32/cashaddr testnet support in
+  // wallet-core (cashaddr is a different, more involved encoding than bech32 — unlike
+  // Litecoin below, not reimplemented here), so it stays on this legacy fallback.
+  private static let bchTestnetP2PKHPrefix: UInt8 = 0x6F
+
+  /// Address for `chain`, honoring `isTestnet`.
+  ///
+  /// wallet-core's coin registry only carries a real testnet derivation for Bitcoin
+  /// (`.bitcoinTestnet`, native segwit — same "bc1"→"tb1" style shift as mainnet). Litecoin and
+  /// Bitcoin Cash have no testnet entry at all (no CoinType, no Derivation):
+  ///  - Litecoin gets a hand-rolled native-segwit bech32 address (see Bech32.swift) — the same
+  ///    style as its own mainnet "ltc1..." address, just hrp "tltc" instead of "ltc". wallet-
+  ///    core's `SegwitAddress` can't do this itself (its HRP is a closed native enum with no
+  ///    "tltc" entry), so this reimplements the encode half of BIP-173 by hand.
+  ///  - Bitcoin Cash gets a legacy P2PKH address instead — a different *style* from its own
+  ///    mainnet cashaddr address (cashaddr testnet isn't implemented), but still a real,
+  ///    correctly-testnet-flagged one.
+  static func address(for chain: ChainKey, wallet: HDWallet, isTestnet: Bool) -> String {
+    guard isTestnet else { return wallet.getAddressForCoin(coin: chain.coinType) }
+    switch chain {
+    case .bitcoin:
+      return wallet.getAddressDerivation(coin: .bitcoin, derivation: .bitcoinTestnet)
+    case .litecoin:
+      let pubKey = key(for: chain, wallet: wallet, isTestnet: true).getPublicKeySecp256k1(compressed: true)
+      return Bech32.encodeSegwitV0(hrp: litecoinTestnetHRP, program: pubKey.bitcoinKeyHash)
+    case .bitcoincash:
+      let pubKey = key(for: chain, wallet: wallet, isTestnet: true).getPublicKeySecp256k1(compressed: true)
+      return BitcoinAddress(publicKey: pubKey, prefix: bchTestnetP2PKHPrefix)!.description
+    // Everything else (EVM/Solana/Tron/Ton/Xrp) shares one address format across
+    // mainnet/testnet — only the RPC endpoint differs, which lives entirely in JS.
+    default:
+      return wallet.getAddressForCoin(coin: chain.coinType)
+    }
+  }
+
+  /// The signing key for `chain`, honoring `isTestnet` — must always derive the same key
+  /// `address(for:)` used, or a UTXO signer builds a transaction that can't spend the
+  /// wallet's own funds (wrong key ⇒ different scriptPubKey than what's actually sitting at
+  /// the receive address it was given).
+  private static func key(for chain: ChainKey, wallet: HDWallet, isTestnet: Bool) -> PrivateKey {
+    guard isTestnet else { return wallet.getKeyForCoin(coin: chain.coinType) }
+    switch chain {
+    case .bitcoin:
+      return wallet.getKeyDerivation(coin: .bitcoin, derivation: .bitcoinTestnet)
+    case .litecoin:
+      return wallet.getKey(coin: chain.coinType, derivationPath: utxoTestnetPath(chain, purpose: 84))
+    case .bitcoincash:
+      return wallet.getKey(coin: chain.coinType, derivationPath: utxoTestnetPath(chain, purpose: 44))
+    default:
+      return wallet.getKeyForCoin(coin: chain.coinType)
+    }
+  }
+
+  static func sign(chain: ChainKey, wallet: HDWallet, unsignedTx: [String: Any], isTestnet: Bool) throws -> Result {
     switch chain {
     case .ethereum, .bnb, .polygon:
       return Result(signedTx: try signEvm(wallet: wallet, coin: chain.coinType, txParams: unsignedTx), meta: nil)
     case .solana:
       return Result(signedTx: try signSolana(wallet: wallet, txParams: unsignedTx), meta: nil)
     case .bitcoin, .litecoin:
-      return Result(signedTx: try signUtxo(wallet: wallet, coin: chain.coinType, txParams: unsignedTx), meta: nil)
+      return Result(signedTx: try signUtxo(wallet: wallet, chain: chain, txParams: unsignedTx, isTestnet: isTestnet), meta: nil)
     case .tron:
       return Result(signedTx: try signTron(wallet: wallet, txParams: unsignedTx), meta: nil)
     case .xrp:
@@ -192,7 +261,7 @@ enum ChainSigner {
   // NOTE(verify-on-device): field names (hashType/toAddress/changeAddress/byteFee/utxo/
   // outPoint/privateKey) match wallet-core's long-documented Bitcoin signing example, but
   // confirm against the installed 4.1.19 generated Swift types before trusting with real funds.
-  private static func signUtxo(wallet: HDWallet, coin: CoinType, txParams: [String: Any]) throws -> String {
+  private static func signUtxo(wallet: HDWallet, chain: ChainKey, txParams: [String: Any], isTestnet: Bool) throws -> String {
     guard let toAddress = txParams["toAddress"] as? String,
           let changeAddress = txParams["changeAddress"] as? String,
           let sendAmountSats = (txParams["sendAmountSats"] as? String).flatMap(Int64.init),
@@ -201,7 +270,8 @@ enum ChainSigner {
       throw Exception(name: "InvalidParams", description: "Missing required UTXO tx params")
     }
 
-    let privateKey = wallet.getKeyForCoin(coin: coin)
+    let coin = chain.coinType
+    let privateKey = key(for: chain, wallet: wallet, isTestnet: isTestnet)
 
     var input = BitcoinSigningInput()
     input.hashType = 1 // SIGHASH_ALL — stable Bitcoin protocol constant, not a wallet-core-specific value

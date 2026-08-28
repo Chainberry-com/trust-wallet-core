@@ -34,15 +34,19 @@ const TrustWalletCore = requireNativeModule("TrustWalletCore");
 /** Generates a new mnemonic and persists it natively (biometry/passcode-gated).
  * strength 128 = 12 words, 256 = 24 words. No BIP-39 passphrase support: signing always
  * reconstructs the wallet from the mnemonic alone, so a caller-supplied passphrase here
- * would derive addresses from a seed different from the one actually used to sign. */
-export async function createWallet(strength: 128 | 256 = 128): Promise<WalletSummary> {
-  return TrustWalletCore.createWallet(strength);
+ * would derive addresses from a seed different from the one actually used to sign.
+ * `isTestnet` selects the address format for BTC/LTC/BCH (every other chain's address is
+ * identical on mainnet and testnet) — callers should pass `IS_TESTNET` from
+ * `@/constants/wallet-env`. */
+export async function createWallet(strength: 128 | 256 = 128, isTestnet = false): Promise<WalletSummary> {
+  return TrustWalletCore.createWallet(strength, isTestnet);
 }
 
 /** One-time mnemonic exposure from the caller — persisted natively immediately, never
- * retained in JS after this call returns. No BIP-39 passphrase support (see `createWallet`). */
-export async function importWallet(mnemonic: string): Promise<WalletSummary> {
-  return TrustWalletCore.importWallet(mnemonic);
+ * retained in JS after this call returns. No BIP-39 passphrase support (see `createWallet`).
+ * `isTestnet` — see `createWallet`. */
+export async function importWallet(mnemonic: string, isTestnet = false): Promise<WalletSummary> {
+  return TrustWalletCore.importWallet(mnemonic, isTestnet);
 }
 
 /** Reads only public metadata (walletId + addresses) — no biometric prompt. */
@@ -55,13 +59,16 @@ export async function deleteWallet(walletId: string): Promise<void> {
 }
 
 /** Triggers the native biometry/passcode prompt, then signs entirely in-process —
- * only signed transaction bytes/hex cross back. */
+ * only signed transaction bytes/hex cross back. `isTestnet` must match whatever
+ * `createWallet`/`importWallet` used for this wallet (see those for why) — pass
+ * `IS_TESTNET` from `@/constants/wallet-env`. */
 export async function signTransaction(
   walletId: string,
   chain: Chain,
   unsignedTx: Record<string, unknown>,
+  isTestnet = false,
 ): Promise<SignResult> {
-  return TrustWalletCore.signTransaction(walletId, chain, unsignedTx);
+  return TrustWalletCore.signTransaction(walletId, chain, unsignedTx, isTestnet);
 }
 
 /** The one sanctioned mnemonic exposure — explicit backup/reveal flow only, gated behind

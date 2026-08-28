@@ -37,16 +37,18 @@ class TrustWalletCoreModule : Module() {
     // No BIP-39 passphrase support: signTransaction always reconstructs the wallet with an
     // empty passphrase, so accepting one here would derive addresses from a seed different
     // from the one actually used to sign — always pass "" to stay consistent with that.
-    AsyncFunction("createWallet") Coroutine { strength: Int ->
+    // isTestnet selects the address format for BTC/LTC/BCH (see ChainSigner.addressForChain) —
+    // every other chain's address is the same on mainnet and testnet.
+    AsyncFunction("createWallet") Coroutine { strength: Int, isTestnet: Boolean ->
       val wallet = HDWallet(strength, "")
-      persistNewWallet(wallet)
+      persistNewWallet(wallet, isTestnet)
     }
 
     // One-time mnemonic exposure from JS, at import only — never retained after this call.
     // Returns { walletId, addresses }. No BIP-39 passphrase support (see `createWallet`).
-    AsyncFunction("importWallet") Coroutine { mnemonic: String ->
+    AsyncFunction("importWallet") Coroutine { mnemonic: String, isTestnet: Boolean ->
       val wallet = HDWallet(mnemonic, "") // throws on invalid mnemonic
-      persistNewWallet(wallet)
+      persistNewWallet(wallet, isTestnet)
     }
 
     // Reads only the ungated metadata store — no biometric prompt.
@@ -70,15 +72,16 @@ class TrustWalletCoreModule : Module() {
     }
 
     // Triggers the native biometry/device-credential prompt, then signs entirely in-process.
-    // Returns { signedTx, meta? }.
-    AsyncFunction("signTransaction") Coroutine { walletId: String, chain: String, unsignedTx: Map<String, Any> ->
+    // Returns { signedTx, meta? }. isTestnet must match whatever `createWallet`/`importWallet`
+    // used — see ChainSigner.keyForChain (a mismatch signs with the wrong key for BTC/LTC).
+    AsyncFunction("signTransaction") Coroutine { walletId: String, chain: String, unsignedTx: Map<String, Any>, isTestnet: Boolean ->
       val id = NativeWalletStore.validateWalletId(walletId)
       val chainKey = ChainKey.fromJs(chain)
       confirmTransaction(chainKey, unsignedTx)
       val cipher = NativeWalletStore.authenticateForExistingWallet(activity, context, id, "Sign transaction")
       val mnemonic = NativeWalletStore.loadMnemonic(context, id, cipher)
       val wallet = HDWallet(mnemonic, "")
-      val result = ChainSigner.sign(chainKey, wallet, unsignedTx)
+      val result = ChainSigner.sign(chainKey, wallet, unsignedTx, isTestnet)
       val response = mutableMapOf<String, Any>("signedTx" to result.signedTx)
       result.meta?.let { response["meta"] = it }
       response
@@ -117,9 +120,11 @@ class TrustWalletCoreModule : Module() {
     }
   }
 
-  private suspend fun persistNewWallet(wallet: HDWallet): Map<String, Any> {
+  private suspend fun persistNewWallet(wallet: HDWallet, isTestnet: Boolean): Map<String, Any> {
     val walletId = UUID.randomUUID().toString()
-    val addresses = ChainKey.entries.associate { chain -> chain.name.lowercase() to wallet.getAddressForCoin(chain.coinType) }
+    val addresses = ChainKey.entries.associate { chain ->
+      chain.name.lowercase() to ChainSigner.addressForChain(wallet, chain, isTestnet)
+    }
 
     val cipher = NativeWalletStore.authenticateForNewWallet(activity, context, walletId, "Secure your new wallet")
     NativeWalletStore.saveMnemonic(context, walletId, wallet.mnemonic(), cipher)

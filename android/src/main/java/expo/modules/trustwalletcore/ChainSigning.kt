@@ -4,9 +4,13 @@ import android.util.Log
 import com.google.protobuf.ByteString
 import org.json.JSONObject
 import wallet.core.java.AnySigner
+import wallet.core.jni.BitcoinAddress
 import wallet.core.jni.CoinType
 import wallet.core.jni.DataVector
+import wallet.core.jni.Derivation
 import wallet.core.jni.HDWallet
+import wallet.core.jni.Hash
+import wallet.core.jni.PrivateKey
 import wallet.core.jni.SolanaTransaction
 import wallet.core.jni.TransactionDecoder
 import wallet.core.jni.proto.Bitcoin
@@ -50,11 +54,75 @@ enum class ChainKey(val coinType: CoinType) {
 data class ChainSignResult(val signedTx: String, val meta: Map<String, Any>?)
 
 object ChainSigner {
-  fun sign(chain: ChainKey, wallet: HDWallet, unsignedTx: Map<String, Any>): ChainSignResult = when (chain) {
+  // SLIP-44 dedicates coin_type 1' to "testnet" for every coin — so a shared literal path
+  // would make Litecoin and Bitcoin Cash derive the *same* key (BIP32 derivation only depends
+  // on (seed, path, curve), and CoinType alone doesn't perturb it when the path and curve
+  // — secp256k1 for both — are identical). Disambiguate by using each coin's own SLIP-44
+  // index as the account (3rd) path component. `purpose` follows the usual BIP44/49/84
+  // convention (44' legacy, 84' native segwit) matching the address style each coin actually
+  // gets below.
+  private fun utxoTestnetPath(chain: ChainKey, purpose: Int): String =
+    "m/$purpose'/1'/${chain.coinType.slip44Id()}'/0/0"
+
+  private const val LITECOIN_TESTNET_HRP = "tltc"
+
+  // Bitcoin Cash testnet legacy P2PKH version byte (0x6F) — same value Bitcoin/Litecoin
+  // testnets use for their base58 legacy prefix. BCH has no bech32/cashaddr testnet support in
+  // wallet-core (cashaddr is a different, more involved encoding than bech32 — unlike
+  // Litecoin below, not reimplemented here), so it stays on this legacy fallback.
+  private const val BCH_TESTNET_P2PKH_PREFIX: Byte = 0x6F
+
+  /** Address for `chain`, honoring `isTestnet`.
+   *
+   * wallet-core's coin registry only carries a real testnet derivation for Bitcoin
+   * (`Derivation.BITCOINTESTNET`, native segwit — same "bc1"→"tb1" style shift as mainnet).
+   * Litecoin and Bitcoin Cash have no testnet entry at all (no CoinType, no Derivation):
+   *  - Litecoin gets a hand-rolled native-segwit bech32 address (see Bech32.kt) — the same
+   *    style as its own mainnet "ltc1..." address, just hrp "tltc" instead of "ltc". wallet-
+   *    core's `SegwitAddress` can't do this itself (its HRP is a closed native enum with no
+   *    "tltc" entry), so this reimplements the encode half of BIP-173 by hand.
+   *  - Bitcoin Cash gets a legacy P2PKH address instead — a different *style* from its own
+   *    mainnet cashaddr address (cashaddr testnet isn't implemented), but still a real,
+   *    correctly-testnet-flagged one.
+   */
+  fun addressForChain(wallet: HDWallet, chain: ChainKey, isTestnet: Boolean): String {
+    if (!isTestnet) return wallet.getAddressForCoin(chain.coinType)
+    return when (chain) {
+      ChainKey.BITCOIN -> wallet.getAddressDerivation(CoinType.BITCOIN, Derivation.BITCOINTESTNET)
+      ChainKey.LITECOIN -> {
+        val pubKey = keyForChain(wallet, chain, isTestnet = true).getPublicKeySecp256k1(true)
+        val program = Hash.sha256RIPEMD(pubKey.data())
+        Bech32.encodeSegwitV0(LITECOIN_TESTNET_HRP, program)
+      }
+      ChainKey.BITCOINCASH -> {
+        val pubKey = keyForChain(wallet, chain, isTestnet = true).getPublicKeySecp256k1(true)
+        BitcoinAddress(pubKey, BCH_TESTNET_P2PKH_PREFIX).description()
+      }
+      // Everything else (EVM/Solana/Tron/Ton/Xrp) shares one address format across
+      // mainnet/testnet — only the RPC endpoint differs, which lives entirely in JS.
+      else -> wallet.getAddressForCoin(chain.coinType)
+    }
+  }
+
+  /** The signing key for `chain`, honoring `isTestnet` — must always derive the same key
+   * `addressForChain` used, or a UTXO signer builds a transaction that can't spend the
+   * wallet's own funds (wrong key ⇒ different scriptPubKey than what's actually sitting at
+   * the receive address it was given). */
+  private fun keyForChain(wallet: HDWallet, chain: ChainKey, isTestnet: Boolean): PrivateKey {
+    if (!isTestnet) return wallet.getKeyForCoin(chain.coinType)
+    return when (chain) {
+      ChainKey.BITCOIN -> wallet.getKeyDerivation(CoinType.BITCOIN, Derivation.BITCOINTESTNET)
+      ChainKey.LITECOIN -> wallet.getKey(CoinType.LITECOIN, utxoTestnetPath(chain, purpose = 84))
+      ChainKey.BITCOINCASH -> wallet.getKey(CoinType.BITCOINCASH, utxoTestnetPath(chain, purpose = 44))
+      else -> wallet.getKeyForCoin(chain.coinType)
+    }
+  }
+
+  fun sign(chain: ChainKey, wallet: HDWallet, unsignedTx: Map<String, Any>, isTestnet: Boolean): ChainSignResult = when (chain) {
     ChainKey.ETHEREUM, ChainKey.BNB, ChainKey.POLYGON ->
       ChainSignResult(signEvm(wallet, chain.coinType, unsignedTx), null)
     ChainKey.SOLANA -> ChainSignResult(signSolana(wallet, unsignedTx), null)
-    ChainKey.BITCOIN, ChainKey.LITECOIN -> ChainSignResult(signUtxo(wallet, chain.coinType, unsignedTx), null)
+    ChainKey.BITCOIN, ChainKey.LITECOIN -> ChainSignResult(signUtxo(wallet, chain, unsignedTx, isTestnet), null)
     ChainKey.TRON -> ChainSignResult(signTron(wallet, unsignedTx), null)
     ChainKey.XRP -> ChainSignResult(signXrp(wallet, unsignedTx), null)
     ChainKey.TON -> signTon(wallet, unsignedTx)
@@ -147,8 +215,9 @@ object ChainSigner {
   // { toAddress, changeAddress, sendAmountSats, changeAmountSats, satsPerByte,
   //   inputs: [{ txIdHex, vout, amountSats, scriptPubKeyHex }] }
   @Suppress("UNCHECKED_CAST")
-  private fun signUtxo(wallet: HDWallet, coin: CoinType, unsignedTx: Map<String, Any>): String {
-    val privateKey = wallet.getKeyForCoin(coin)
+  private fun signUtxo(wallet: HDWallet, chain: ChainKey, unsignedTx: Map<String, Any>, isTestnet: Boolean): String {
+    val coin = chain.coinType
+    val privateKey = keyForChain(wallet, chain, isTestnet)
     val toAddress = unsignedTx["toAddress"] as? String ?: throw ChainSigningException("Missing toAddress")
     val changeAddress = unsignedTx["changeAddress"] as? String ?: throw ChainSigningException("Missing changeAddress")
     val sendAmountSats = (unsignedTx["sendAmountSats"] as? String)?.toLong() ?: throw ChainSigningException("Missing sendAmountSats")

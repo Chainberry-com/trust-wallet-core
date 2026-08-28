@@ -14,12 +14,14 @@ public class TrustWalletCoreModule: Module {
     // No BIP-39 passphrase support: signTransaction always reconstructs the wallet with an
     // empty passphrase, so accepting one here would derive addresses from a seed different
     // from the one actually used to sign — always pass "" to stay consistent with that.
-    AsyncFunction("createWallet") { (strength: Int) throws -> [String: Any] in
+    // isTestnet selects the address format for BTC/LTC/BCH (see ChainSigner.address(for:)) —
+    // every other chain's address is the same on mainnet and testnet.
+    AsyncFunction("createWallet") { (strength: Int, isTestnet: Bool) throws -> [String: Any] in
       guard let wallet = HDWallet(strength: Int32(strength), passphrase: "") else {
         throw Exception(name: "WalletError", description: "Failed to generate wallet")
       }
       do {
-        return try Self.persistNewWallet(wallet: wallet)
+        return try Self.persistNewWallet(wallet: wallet, isTestnet: isTestnet)
       } catch let e as NativeWalletStoreError {
         throw e.asException
       }
@@ -27,12 +29,12 @@ public class TrustWalletCoreModule: Module {
 
     // One-time mnemonic exposure from JS, at import only — never retained after this call.
     // Returns { walletId, addresses }. No BIP-39 passphrase support (see `createWallet`).
-    AsyncFunction("importWallet") { (mnemonic: String) throws -> [String: Any] in
+    AsyncFunction("importWallet") { (mnemonic: String, isTestnet: Bool) throws -> [String: Any] in
       guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: "") else {
         throw Exception(name: "InvalidMnemonic", description: "Invalid mnemonic phrase")
       }
       do {
-        return try Self.persistNewWallet(wallet: wallet)
+        return try Self.persistNewWallet(wallet: wallet, isTestnet: isTestnet)
       } catch let e as NativeWalletStoreError {
         throw e.asException
       }
@@ -67,8 +69,9 @@ public class TrustWalletCoreModule: Module {
     }
 
     // Triggers the native biometry/passcode prompt, then signs entirely in-process.
-    // Returns { signedTx, meta? }.
-    AsyncFunction("signTransaction") { (walletId: String, chain: String, unsignedTx: [String: Any]) async throws -> [String: Any] in
+    // Returns { signedTx, meta? }. isTestnet must match whatever `createWallet`/`importWallet`
+    // used — see ChainSigner.key(for:) (a mismatch signs with the wrong key for BTC/LTC).
+    AsyncFunction("signTransaction") { (walletId: String, chain: String, unsignedTx: [String: Any], isTestnet: Bool) async throws -> [String: Any] in
       do {
         let id = try NativeWalletStore.validateWalletId(walletId)
         let chainKey = try ChainKey(fromJs: chain)
@@ -78,7 +81,7 @@ public class TrustWalletCoreModule: Module {
         guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: "") else {
           throw Exception(name: "InvalidMnemonic", description: "Stored mnemonic failed validation")
         }
-        let result = try ChainSigner.sign(chain: chainKey, wallet: wallet, unsignedTx: unsignedTx)
+        let result = try ChainSigner.sign(chain: chainKey, wallet: wallet, unsignedTx: unsignedTx, isTestnet: isTestnet)
         var response: [String: Any] = ["signedTx": result.signedTx]
         if let meta = result.meta { response["meta"] = meta }
         return response
@@ -130,11 +133,11 @@ public class TrustWalletCoreModule: Module {
     }
   }
 
-  private static func persistNewWallet(wallet: HDWallet) throws -> [String: Any] {
+  private static func persistNewWallet(wallet: HDWallet, isTestnet: Bool) throws -> [String: Any] {
     let walletId = UUID().uuidString
     var addresses: [String: String] = [:]
     for chain in ChainKey.allCases {
-      addresses[chain.rawValue] = wallet.getAddressForCoin(coin: chain.coinType)
+      addresses[chain.rawValue] = ChainSigner.address(for: chain, wallet: wallet, isTestnet: isTestnet)
     }
 
     try NativeWalletStore.saveMnemonic(wallet.mnemonic, walletId: walletId)
