@@ -20,7 +20,8 @@ export type Chain =
   | "tron"
   | "ton"
   | "bitcoin"
-  | "bitcoincash" // address derivation only — sending is unsupported, see ChainSigner
+  | "bitcoincash"
+  | "dogecoin"
   | "litecoin"
   | "xrp";
 
