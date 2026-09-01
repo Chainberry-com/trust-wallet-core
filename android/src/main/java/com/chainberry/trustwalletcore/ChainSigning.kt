@@ -439,7 +439,8 @@ object ChainSigner {
 internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, Any>): String {
   val lines = mutableListOf("Network: ${chain.name}")
   when (chain) {
-    ChainKey.ETHEREUM, ChainKey.BNB, ChainKey.POLYGON -> {
+    ChainKey.ETHEREUM, ChainKey.BNB, ChainKey.POLYGON,
+    ChainKey.AVAX, ChainKey.BASE, ChainKey.ARBITRUM, ChainKey.OPTIMISM, ChainKey.SONIC -> {
       (unsignedTx["to"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
       val valueWei = txHexToDouble((unsignedTx["valueHex"] as? String) ?: "0")
       lines += "Amount: ${fmtAmt(valueWei / 1e18)} ${chain.symbol}"
