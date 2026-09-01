@@ -37,20 +37,27 @@ private inline fun debugLog(msg: () -> String) {
 enum class ChainKey(val coinType: CoinType) {
   ETHEREUM(CoinType.ETHEREUM),
   BNB(CoinType.SMARTCHAIN),
-  // Polygon shares Ethereum's secp256k1 key/address (same BIP44 path) — no distinct CoinType.
+  // All EVM chains share Ethereum's secp256k1 key/address (BIP44 slip44 = 60) — no distinct CoinType.
   POLYGON(CoinType.ETHEREUM),
+  AVAX(CoinType.ETHEREUM),
+  BASE(CoinType.ETHEREUM),
+  ARBITRUM(CoinType.ETHEREUM),
+  OPTIMISM(CoinType.ETHEREUM),
+  SONIC(CoinType.ETHEREUM),
   SOLANA(CoinType.SOLANA),
   TRON(CoinType.TRON),
   TON(CoinType.TON),
   BITCOIN(CoinType.BITCOIN),
   BITCOINCASH(CoinType.BITCOINCASH),
+  DOGECOIN(CoinType.DOGECOIN),
   LITECOIN(CoinType.LITECOIN),
   XRP(CoinType.XRP);
 
   val symbol: String get() = when (this) {
-    ETHEREUM -> "ETH"; BNB -> "BNB"; POLYGON -> "POL"; SOLANA -> "SOL"
-    TRON -> "TRX"; TON -> "TON"; BITCOIN -> "BTC"; BITCOINCASH -> "BCH"
-    LITECOIN -> "LTC"; XRP -> "XRP"
+    ETHEREUM -> "ETH"; BNB -> "BNB"; POLYGON -> "POL"
+    AVAX -> "AVAX"; BASE -> "ETH"; ARBITRUM -> "ETH"; OPTIMISM -> "ETH"; SONIC -> "S"
+    SOLANA -> "SOL"; TRON -> "TRX"; TON -> "TON"
+    BITCOIN -> "BTC"; BITCOINCASH -> "BCH"; DOGECOIN -> "DOGE"; LITECOIN -> "LTC"; XRP -> "XRP"
   }
 
   companion object {
@@ -128,16 +135,15 @@ object ChainSigner {
   }
 
   fun sign(chain: ChainKey, wallet: HDWallet, unsignedTx: Map<String, Any>, isTestnet: Boolean): ChainSignResult = when (chain) {
-    ChainKey.ETHEREUM, ChainKey.BNB, ChainKey.POLYGON ->
+    ChainKey.ETHEREUM, ChainKey.BNB, ChainKey.POLYGON,
+    ChainKey.AVAX, ChainKey.BASE, ChainKey.ARBITRUM, ChainKey.OPTIMISM, ChainKey.SONIC ->
       ChainSignResult(signEvm(wallet, chain.coinType, unsignedTx), null)
     ChainKey.SOLANA -> ChainSignResult(signSolana(wallet, unsignedTx), null)
-    ChainKey.BITCOIN, ChainKey.LITECOIN -> ChainSignResult(signUtxo(wallet, chain, unsignedTx, isTestnet), null)
+    ChainKey.BITCOIN, ChainKey.DOGECOIN, ChainKey.LITECOIN -> ChainSignResult(signUtxo(wallet, chain, unsignedTx, isTestnet), null)
     ChainKey.TRON -> ChainSignResult(signTron(wallet, unsignedTx), null)
     ChainKey.XRP -> ChainSignResult(signXrp(wallet, unsignedTx), null)
     ChainKey.TON -> signTon(wallet, unsignedTx)
-    // Sending is intentionally unsupported: chainberry-wallet's prepareSelfCustodyUnsignedTx has
-    // no BCH case — this app only ever needs BCH address derivation, never a signed BCH tx.
-    ChainKey.BITCOINCASH -> throw ChainSigningException("BCH sending is not supported")
+    ChainKey.BITCOINCASH -> ChainSignResult(signBch(wallet, unsignedTx), null)
   }
 
   // MARK: - EVM (ethereum / bnb / polygon)
@@ -217,6 +223,59 @@ object ChainSigner {
     )
     if (output.error != Common.SigningError.OK) throw ChainSigningException("Signing failed: ${output.errorMessage}")
     return output.encoded
+  }
+
+  // MARK: - BCH (UTXO-based, replay-protected)
+  // unsignedTx: { unsignedDescriptorJson: string }
+  // descriptor (from wallet-broadcast's prepareBchTransaction):
+  //   { inputs: [{ txid, vout, satoshis, scriptPubKeyHex }], toAddress, sendAmountSats,
+  //     changeAddress?, changeSats? }
+  // BCH uses SIGHASH_ALL | SIGHASH_FORK_ID (0x41) for replay protection.
+  private fun signBch(wallet: HDWallet, unsignedTx: Map<String, Any>): String {
+    val descriptorJson = unsignedTx["unsignedDescriptorJson"] as? String
+      ?: throw ChainSigningException("Missing unsignedDescriptorJson for BCH")
+
+    val descriptor = JSONObject(descriptorJson)
+    val toAddress = descriptor.getString("toAddress")
+    val sendAmountSats = descriptor.getLong("sendAmountSats")
+    val changeAddress = if (descriptor.has("changeAddress")) descriptor.getString("changeAddress") else null
+    val inputsJson = descriptor.getJSONArray("inputs")
+
+    val privateKey = wallet.getKeyForCoin(CoinType.BITCOINCASH)
+
+    val utxos = (0 until inputsJson.length()).map { i ->
+      val entry = inputsJson.getJSONObject(i)
+      val txIdHex = entry.getString("txid")
+      val vout = entry.getInt("vout")
+      val satoshis = entry.getLong("satoshis")
+      val scriptHex = entry.getString("scriptPubKeyHex")
+      val txIdBytes = txIdHex.hexToBytes().reversedArray()
+
+      Bitcoin.UnspentTransaction.newBuilder().apply {
+        this.outPoint = Bitcoin.OutPoint.newBuilder().apply {
+          this.hash = ByteString.copyFrom(txIdBytes)
+          this.index = vout
+        }.build()
+        this.amount = satoshis
+        this.script = ByteString.copyFrom(scriptHex.hexToBytes())
+      }.build()
+    }
+
+    val input = Bitcoin.SigningInput.newBuilder().apply {
+      this.hashType = 0x41 // SIGHASH_ALL | SIGHASH_FORK_ID (BCH replay protection)
+      this.amount = sendAmountSats
+      this.byteFee = 1 // BCH fees are minimal; 1 sat/byte
+      this.toAddress = toAddress
+      if (changeAddress != null) this.changeAddress = changeAddress
+      this.useMaxAmount = false
+      this.coinType = CoinType.BITCOINCASH.value()
+      this.addPrivateKey(ByteString.copyFrom(privateKey.data()))
+      this.addAllUtxo(utxos)
+    }.build()
+
+    val output = AnySigner.sign(input, CoinType.BITCOINCASH, Bitcoin.SigningOutput.parser())
+    if (output.error != Common.SigningError.OK) throw ChainSigningException("BCH signing failed: ${output.errorMessage}")
+    return output.encoded.toByteArray().toHex()
   }
 
   // MARK: - BTC / LTC (UTXO-based)
@@ -391,7 +450,7 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
       val feeWei = gasLimit * gasPrice
       if (feeWei > 0) lines += "Max fee: ${fmtAmt(feeWei / 1e18)} ${chain.symbol}"
     }
-    ChainKey.BITCOIN, ChainKey.LITECOIN -> {
+    ChainKey.BITCOIN, ChainKey.DOGECOIN, ChainKey.LITECOIN -> {
       (unsignedTx["toAddress"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
       (unsignedTx["sendAmountSats"] as? String)?.toLongOrNull()?.let {
         lines += "Amount: ${fmtAmt(it.toDouble() / 1e8)} ${chain.symbol}"
@@ -425,7 +484,14 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
       }
     }
     ChainKey.SOLANA -> lines += "(Solana — details verified by the network)"
-    ChainKey.BITCOINCASH -> {}
+    ChainKey.BITCOINCASH -> {
+      try {
+        val descriptor = JSONObject((unsignedTx["unsignedDescriptorJson"] as? String) ?: "")
+        descriptor.optString("toAddress").takeIf { it.isNotEmpty() }?.let { lines += "To: ${fmtAddr(it)}" }
+        val sats = descriptor.optLong("sendAmountSats", -1L)
+        if (sats >= 0) lines += "Amount: ${fmtAmt(sats.toDouble() / 1e8)} BCH"
+      } catch (_: Exception) {}
+    }
   }
   return lines.joinToString("\n")
 }

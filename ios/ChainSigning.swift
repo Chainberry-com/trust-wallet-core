@@ -5,9 +5,10 @@ import WalletCore
 // All chains this module derives addresses for / signs transactions for.
 enum ChainKey: String, CaseIterable {
   case ethereum, bnb, polygon
+  case avax, base, arbitrum, optimism, sonic
   case solana
   case tron, ton
-  case bitcoin, bitcoincash, litecoin
+  case bitcoin, bitcoincash, dogecoin, litecoin
   case xrp
 
   init(fromJs raw: String) throws {
@@ -22,26 +23,33 @@ enum ChainKey: String, CaseIterable {
     case .ethereum: return "ETH"
     case .bnb:      return "BNB"
     case .polygon:  return "POL"
+    case .avax:     return "AVAX"
+    case .base:     return "ETH"
+    case .arbitrum: return "ETH"
+    case .optimism: return "ETH"
+    case .sonic:    return "S"
     case .solana:   return "SOL"
     case .tron:     return "TRX"
     case .ton:      return "TON"
     case .bitcoin:  return "BTC"
     case .bitcoincash: return "BCH"
+    case .dogecoin: return "DOGE"
     case .litecoin: return "LTC"
     case .xrp:      return "XRP"
     }
   }
 
-  // Polygon shares Ethereum's secp256k1 key/address (same BIP44 path) — no distinct CoinType.
+  // All EVM chains share Ethereum's secp256k1 key/address (BIP44 slip44 = 60) — no distinct CoinType.
   var coinType: CoinType {
     switch self {
-    case .ethereum, .polygon: return .ethereum
+    case .ethereum, .polygon, .avax, .base, .arbitrum, .optimism, .sonic: return .ethereum
     case .bnb: return .smartChain
     case .solana: return .solana
     case .tron: return .tron
     case .ton: return .ton
     case .bitcoin: return .bitcoin
     case .bitcoincash: return .bitcoinCash
+    case .dogecoin: return .dogecoin
     case .litecoin: return .litecoin
     case .xrp: return .xrp
     }
@@ -125,11 +133,11 @@ enum ChainSigner {
 
   static func sign(chain: ChainKey, wallet: HDWallet, unsignedTx: [String: Any], isTestnet: Bool) throws -> Result {
     switch chain {
-    case .ethereum, .bnb, .polygon:
+    case .ethereum, .bnb, .polygon, .avax, .base, .arbitrum, .optimism, .sonic:
       return Result(signedTx: try signEvm(wallet: wallet, coin: chain.coinType, txParams: unsignedTx), meta: nil)
     case .solana:
       return Result(signedTx: try signSolana(wallet: wallet, txParams: unsignedTx), meta: nil)
-    case .bitcoin, .litecoin:
+    case .bitcoin, .dogecoin, .litecoin:
       return Result(signedTx: try signUtxo(wallet: wallet, chain: chain, txParams: unsignedTx, isTestnet: isTestnet), meta: nil)
     case .tron:
       return Result(signedTx: try signTron(wallet: wallet, txParams: unsignedTx), meta: nil)
@@ -138,10 +146,7 @@ enum ChainSigner {
     case .ton:
       return try signTon(wallet: wallet, txParams: unsignedTx)
     case .bitcoincash:
-      // Sending is intentionally unsupported: chainberry-wallet's prepareSelfCustodyUnsignedTx
-      // has no BCH case (its own comment notes apps/selfCustodySigner's signer doesn't either) —
-      // this app only ever needs BCH address derivation, never a signed BCH transaction.
-      throw Exception(name: "UnsupportedChain", description: "BCH sending is not supported")
+      return Result(signedTx: try signBch(wallet: wallet, txParams: unsignedTx), meta: nil)
     }
   }
 
@@ -252,6 +257,66 @@ enum ChainSigner {
       throw Exception(name: "SigningFailed", description: output.errorMessage)
     }
     return output.encoded
+  }
+
+  // MARK: - BCH (UTXO-based, replay-protected)
+  // txParams: { unsignedDescriptorJson: string }
+  // descriptor (from wallet-broadcast's prepareBchTransaction):
+  //   { inputs: [{ txid, vout, satoshis, scriptPubKeyHex }], toAddress, sendAmountSats,
+  //     changeAddress?, changeSats? }
+  // BCH uses SIGHASH_ALL | SIGHASH_FORK_ID (0x41) for replay protection — distinct from
+  // BTC/LTC's plain SIGHASH_ALL (0x01).
+  private static func signBch(wallet: HDWallet, txParams: [String: Any]) throws -> String {
+    guard let descriptorJson = txParams["unsignedDescriptorJson"] as? String,
+          let descriptorData = descriptorJson.data(using: .utf8),
+          let descriptor = try? JSONSerialization.jsonObject(with: descriptorData) as? [String: Any],
+          let toAddress = descriptor["toAddress"] as? String,
+          let sendAmountSats = (descriptor["sendAmountSats"] as? NSNumber)?.int64Value,
+          let inputs = descriptor["inputs"] as? [[String: Any]] else {
+      throw Exception(name: "InvalidParams", description: "Invalid BCH descriptor JSON")
+    }
+
+    let privateKey = wallet.getKeyForCoin(coin: .bitcoinCash)
+
+    var input = BitcoinSigningInput()
+    input.hashType = 0x41 // SIGHASH_ALL | SIGHASH_FORK_ID (BCH replay protection)
+    input.amount = sendAmountSats
+    input.byteFee = 1 // BCH fees are minimal; 1 sat/byte is the ecosystem standard
+    input.toAddress = toAddress
+    if let changeAddress = descriptor["changeAddress"] as? String {
+      input.changeAddress = changeAddress
+    }
+    input.useMaxAmount = false
+    input.coinType = CoinType.bitcoinCash.rawValue
+    input.privateKey = [privateKey.data]
+
+    input.utxo = try inputs.map { entry in
+      guard let txid = entry["txid"] as? String,
+            let voutNum = entry["vout"] as? NSNumber,
+            let satoshisNum = entry["satoshis"] as? NSNumber,
+            let scriptHex = entry["scriptPubKeyHex"] as? String,
+            let scriptData = hexData(scriptHex),
+            var txIdData = hexData(txid) else {
+        throw Exception(name: "InvalidParams", description: "Invalid BCH UTXO entry")
+      }
+      txIdData.reverse()
+
+      var outPoint = BitcoinOutPoint()
+      outPoint.hash = txIdData
+      outPoint.index = UInt32(voutNum.intValue)
+
+      var utxo = BitcoinUnspentTransaction()
+      utxo.outPoint = outPoint
+      utxo.amount = satoshisNum.int64Value
+      utxo.script = scriptData
+      return utxo
+    }
+
+    let output: BitcoinSigningOutput = AnySigner.sign(input: input, coin: .bitcoinCash)
+    guard output.error == .ok else {
+      throw Exception(name: "SigningFailed", description: output.errorMessage)
+    }
+    return output.encoded.hexString
   }
 
   // MARK: - BTC / LTC (UTXO-based)
@@ -446,7 +511,7 @@ enum ChainSigner {
       let fee = gasLimit * gasPrice
       if fee > 0 { lines.append("Max fee: \(fmtAmt(fee / 1e18)) \(chain.symbol)") }
 
-    case .bitcoin, .litecoin:
+    case .bitcoin, .dogecoin, .litecoin:
       if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
       if let sats = (unsignedTx["sendAmountSats"] as? String).flatMap(Int64.init) {
         lines.append("Amount: \(fmtAmt(Double(sats) / 1e8)) \(chain.symbol)")
@@ -481,7 +546,14 @@ enum ChainSigner {
       lines.append("(Solana — details verified by the network)")
 
     case .bitcoincash:
-      break
+      if let descriptorJson = unsignedTx["unsignedDescriptorJson"] as? String,
+         let data = descriptorJson.data(using: .utf8),
+         let descriptor = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        if let to = descriptor["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+        if let sats = (descriptor["sendAmountSats"] as? NSNumber)?.int64Value {
+          lines.append("Amount: \(fmtAmt(Double(sats) / 1e8)) BCH")
+        }
+      }
     }
     return lines.joined(separator: "\n")
   }
