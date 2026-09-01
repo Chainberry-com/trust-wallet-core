@@ -1,10 +1,10 @@
 {
   "platforms": ["ios", "android"],
   "ios": {
-    "modules": ["TrustWalletCoreModule"],
-    "podspecPath": "TrustWalletCoreModule.podspec"
+    "modules": ["ChainberryTrustWalletCoreModule"],
+    "podspecPath": "ChainberryTrustWalletCoreModule.podspec"
   },
   "android": {
-    "modules": ["expo.modules.trustwalletcore.TrustWalletCoreModule"]
+    "modules": ["com.chainberry.trustwalletcore.ChainberryTrustWalletCoreModule"]
   }
 }

@@ -4,7 +4,7 @@ Standalone SwiftPM package that unit-tests the pure amount-parsing helpers in
 [`../ios/AmountParsing.swift`](../ios/AmountParsing.swift) (symlinked into
 `Sources/AmountParsing/`) against the shared fixture at
 [`../conformance/amount-parsing-cases.json`](../conformance/amount-parsing-cases.json) — the
-same fixture [`../android/.../AmountParsingConformanceTest.kt`](../android/src/test/java/expo/modules/trustwalletcore/AmountParsingConformanceTest.kt)
+same fixture [`../android/.../AmountParsingConformanceTest.kt`](../android/src/test/java/com/chainberry/trustwalletcore/AmountParsingConformanceTest.kt)
 reads on the Android side, so the two platforms' parsing behavior can't silently drift apart.
 
 Deliberately has no dependency on WalletCore or ExpoModulesCore, and no dependency on the

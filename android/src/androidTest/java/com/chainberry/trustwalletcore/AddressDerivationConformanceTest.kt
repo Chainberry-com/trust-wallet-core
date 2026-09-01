@@ -1,4 +1,4 @@
-package expo.modules.trustwalletcore
+package com.chainberry.trustwalletcore
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals

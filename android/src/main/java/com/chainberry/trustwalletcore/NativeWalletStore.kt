@@ -1,4 +1,4 @@
-package expo.modules.trustwalletcore
+package com.chainberry.trustwalletcore
 
 import android.app.KeyguardManager
 import android.content.Context

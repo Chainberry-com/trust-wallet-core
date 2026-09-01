@@ -1,4 +1,4 @@
-package expo.modules.trustwalletcore
+package com.chainberry.trustwalletcore
 
 // Pure numeric-string parsing for the XRP/TON fields that need to fail closed on malformed
 // input, mirroring ios/AmountParsing.swift 1:1 (same function names/behavior) so both

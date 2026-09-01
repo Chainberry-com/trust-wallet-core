@@ -12,7 +12,7 @@ apply from: new File(
 applyKotlinExpoModulesCorePlugin()
 
 android {
-  namespace 'expo.modules.trustwalletcore'
+  namespace 'com.chainberry.trustwalletcore'
   compileSdkVersion 36
 
   defaultConfig {

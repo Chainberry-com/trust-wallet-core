@@ -1,4 +1,4 @@
-package expo.modules.trustwalletcore
+package com.chainberry.trustwalletcore
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
@@ -11,7 +11,7 @@ import wallet.core.jni.HDWallet
 // Instrumented test — must run on a device or emulator (needs the TrustWalletCore JNI library).
 // Run via: ./gradlew connectedDebugAndroidTest
 //
-// Verifies that ChainSigner.sign() — the exact same call path TrustWalletCoreModule.kt uses in
+// Verifies that ChainSigner.sign() — the exact same call path ChainberryTrustWalletCoreModule.kt uses in
 // production — produces the expected byte-for-byte signed output for a fixed, representative
 // unsignedTx per chain, under WalletCore 4.1.19 (the pinned version). Inputs are deterministic
 // but NOT necessarily broadcast-valid (fake txids/blockhash/etc.) — this is a regression fixture,

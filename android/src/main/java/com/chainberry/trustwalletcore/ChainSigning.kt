@@ -1,4 +1,4 @@
-package expo.modules.trustwalletcore
+package com.chainberry.trustwalletcore
 
 import android.util.Log
 import com.google.protobuf.ByteString
@@ -375,7 +375,7 @@ object ChainSigner {
   }
 }
 
-// Transaction summary helpers (used by TrustWalletCoreModule for native confirmation UI)
+// Transaction summary helpers (used by ChainberryTrustWalletCoreModule for native confirmation UI)
 
 internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, Any>): String {
   val lines = mutableListOf("Network: ${chain.name}")

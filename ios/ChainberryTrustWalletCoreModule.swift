@@ -6,7 +6,7 @@ import WalletCore
 // Mnemonic/private-key material never crosses back to JS except `exportMnemonic` — an
 // explicit, biometric/passcode-gated backup flow. Every other method returns only
 // walletIds, addresses, or signed transaction bytes/hex.
-public class TrustWalletCoreModule: Module {
+public class ChainberryTrustWalletCoreModule: Module {
   public func definition() -> ModuleDefinition {
     Name("TrustWalletCore")
 

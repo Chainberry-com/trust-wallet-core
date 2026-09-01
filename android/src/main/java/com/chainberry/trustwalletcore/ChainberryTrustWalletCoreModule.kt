@@ -1,4 +1,4 @@
-package expo.modules.trustwalletcore
+package com.chainberry.trustwalletcore
 
 import android.app.AlertDialog
 import androidx.fragment.app.FragmentActivity
@@ -15,7 +15,7 @@ import kotlin.coroutines.resumeWithException
 // Mnemonic/private-key material never crosses back to JS except `exportMnemonic` — an
 // explicit, biometric/device-credential-gated backup flow. Every other method returns only
 // walletIds, addresses, or signed transaction bytes/hex.
-class TrustWalletCoreModule : Module() {
+class ChainberryTrustWalletCoreModule : Module() {
   companion object {
     init {
       // Must be loaded once before any JNI calls

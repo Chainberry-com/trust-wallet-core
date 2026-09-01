@@ -4,8 +4,8 @@ import { requireNativeModule } from "expo-modules-core";
  * Mnemonic/private-key material never crosses this boundary except `exportMnemonic` —
  * an explicit, biometric/passcode-gated backup flow. Every other function returns only
  * walletIds, addresses, or signed transaction bytes/hex; wallet storage and all signing
- * happen entirely inside the native module (see ios/TrustWalletCoreModule.swift,
- * android/.../TrustWalletCoreModule.kt).
+ * happen entirely inside the native module (see ios/ChainberryTrustWalletCoreModule.swift,
+ * android/.../ChainberryTrustWalletCoreModule.kt).
  */
 export type Chain =
   | "ethereum"

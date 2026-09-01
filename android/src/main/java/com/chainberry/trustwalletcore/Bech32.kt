@@ -1,4 +1,4 @@
-package expo.modules.trustwalletcore
+package com.chainberry.trustwalletcore
 
 /**
  * Minimal BIP-173 (bech32) segwit-address encoder, witness-version-0 only.

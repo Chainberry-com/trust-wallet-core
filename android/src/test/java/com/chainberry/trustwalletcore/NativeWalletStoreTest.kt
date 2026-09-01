@@ -1,4 +1,4 @@
-package expo.modules.trustwalletcore
+package com.chainberry.trustwalletcore
 
 import android.security.keystore.KeyProperties
 import androidx.biometric.BiometricManager

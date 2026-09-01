@@ -1,4 +1,4 @@
-package expo.modules.trustwalletcore
+package com.chainberry.trustwalletcore
 
 import org.json.JSONArray
 import org.junit.Assert.assertTrue
