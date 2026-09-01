@@ -10,6 +10,7 @@ enum ChainKey: String, CaseIterable {
   case tron, ton
   case bitcoin, bitcoincash, dogecoin, litecoin
   case xrp
+  case cosmos
 
   init(fromJs raw: String) throws {
     guard let key = ChainKey(rawValue: raw) else {
@@ -36,6 +37,7 @@ enum ChainKey: String, CaseIterable {
     case .dogecoin: return "DOGE"
     case .litecoin: return "LTC"
     case .xrp:      return "XRP"
+    case .cosmos:   return "ATOM"
     }
   }
 
@@ -52,6 +54,7 @@ enum ChainKey: String, CaseIterable {
     case .dogecoin: return .dogecoin
     case .litecoin: return .litecoin
     case .xrp: return .xrp
+    case .cosmos: return .cosmos
     }
   }
 }
@@ -147,6 +150,8 @@ enum ChainSigner {
       return try signTon(wallet: wallet, txParams: unsignedTx)
     case .bitcoincash:
       return Result(signedTx: try signBch(wallet: wallet, txParams: unsignedTx), meta: nil)
+    case .cosmos:
+      return Result(signedTx: try signCosmos(wallet: wallet, txParams: unsignedTx), meta: nil)
     }
   }
 
@@ -494,6 +499,65 @@ enum ChainSigner {
     return ChainSigner.Result(signedTx: output.encoded, meta: ["txHash": output.hash.hexString])
   }
 
+  // MARK: - Cosmos (ATOM)
+  // txParams: { accountNumber, sequence, chainId, feeAmount, gas, memo, fromAddress, toAddress,
+  //             amount (uatom, decimal string), denom }
+  // Returns output.serialized — the ready-to-broadcast JSON
+  // {"mode":"BROADCAST_MODE_SYNC","tx_bytes":"<base64>"} posted directly to the Cosmos LCD.
+  private static func signCosmos(wallet: HDWallet, txParams: [String: Any]) throws -> String {
+    guard let fromAddress = txParams["fromAddress"] as? String,
+          let toAddress = txParams["toAddress"] as? String,
+          let amountStr = txParams["amount"] as? String,
+          let feeAmountStr = txParams["feeAmount"] as? String,
+          let denom = txParams["denom"] as? String,
+          let chainId = txParams["chainId"] as? String,
+          let accountNumberNum = txParams["accountNumber"] as? NSNumber,
+          let sequenceNum = txParams["sequence"] as? NSNumber,
+          let gasNum = txParams["gas"] as? NSNumber else {
+      throw Exception(name: "InvalidParams", description: "Missing required Cosmos tx params")
+    }
+    let memo = (txParams["memo"] as? String) ?? ""
+
+    let privateKey = wallet.getKeyForCoin(coin: .cosmos)
+
+    var sendAmount = CosmosAmount()
+    sendAmount.denom = denom
+    sendAmount.amount = amountStr
+
+    var send = CosmosMessage.Send()
+    send.fromAddress = fromAddress
+    send.toAddress = toAddress
+    send.amounts = [sendAmount]
+
+    var message = CosmosMessage()
+    message.sendCoinsMessage = send
+
+    var feeAmt = CosmosAmount()
+    feeAmt.denom = denom
+    feeAmt.amount = feeAmountStr
+
+    var fee = CosmosFee()
+    fee.amounts = [feeAmt]
+    fee.gas = UInt64(gasNum.intValue)
+
+    var input = CosmosSigningInput()
+    input.signingMode = .protobuf
+    input.accountNumber = UInt64(accountNumberNum.intValue)
+    input.chainID = chainId
+    input.sequence = UInt64(sequenceNum.intValue)
+    input.memo = memo
+    input.fee = fee
+    input.messages = [message]
+    input.privateKey = privateKey.data
+    input.mode = .sync
+
+    let output: CosmosSigningOutput = AnySigner.sign(input: input, coin: .cosmos)
+    guard output.error == .ok else {
+      throw Exception(name: "SigningFailed", description: output.errorMessage)
+    }
+    return output.serialized
+  }
+
   // MARK: - Transaction summary for native confirmation UI
 
   static func buildSummary(chain: ChainKey, unsignedTx: [String: Any]) -> String {
@@ -552,6 +616,15 @@ enum ChainSigner {
         if let sats = (descriptor["sendAmountSats"] as? NSNumber)?.int64Value {
           lines.append("Amount: \(fmtAmt(Double(sats) / 1e8)) BCH")
         }
+      }
+
+    case .cosmos:
+      if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+      if let uatom = (unsignedTx["amount"] as? String).flatMap(Int64.init) {
+        lines.append("Amount: \(fmtAmt(Double(uatom) / 1_000_000)) ATOM")
+      }
+      if let feeUatom = (unsignedTx["feeAmount"] as? String).flatMap(Int64.init) {
+        lines.append("Fee: \(fmtAmt(Double(feeUatom) / 1_000_000)) ATOM")
       }
     }
     return lines.joined(separator: "\n")

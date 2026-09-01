@@ -81,6 +81,25 @@ class ChainberryTrustWalletCoreModule : Module() {
       val cipher = NativeWalletStore.authenticateForExistingWallet(activity, context, id, "Sign transaction")
       val mnemonic = NativeWalletStore.loadMnemonic(context, id, cipher)
       val wallet = HDWallet(mnemonic, "")
+      // Backfill any addresses missing from metadata (chains added after wallet was created).
+      // Runs silently after the biometric gate — no extra prompt needed.
+      val metadata = NativeWalletStore.loadMetadata(context).toMutableMap()
+      @Suppress("UNCHECKED_CAST")
+      val storedAddresses = (metadata[id] as? Map<String, String>)?.toMutableMap()
+      if (storedAddresses != null) {
+        var changed = false
+        for (chainEntry in ChainKey.entries) {
+          val key = chainEntry.name.lowercase()
+          if (!storedAddresses.containsKey(key)) {
+            storedAddresses[key] = ChainSigner.addressForChain(wallet, chainEntry, isTestnet)
+            changed = true
+          }
+        }
+        if (changed) {
+          metadata[id] = storedAddresses
+          runCatching { NativeWalletStore.saveMetadata(context, metadata) }
+        }
+      }
       val result = ChainSigner.sign(chainKey, wallet, unsignedTx, isTestnet)
       val response = mutableMapOf<String, Any>("signedTx" to result.signedTx)
       result.meta?.let { response["meta"] = it }

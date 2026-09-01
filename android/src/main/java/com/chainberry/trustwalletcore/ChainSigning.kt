@@ -15,6 +15,7 @@ import wallet.core.jni.SolanaTransaction
 import wallet.core.jni.TransactionDecoder
 import wallet.core.jni.proto.Bitcoin
 import wallet.core.jni.proto.Common
+import wallet.core.jni.proto.Cosmos
 import wallet.core.jni.proto.Ethereum
 import wallet.core.jni.proto.Ripple
 import wallet.core.jni.proto.Solana
@@ -51,13 +52,15 @@ enum class ChainKey(val coinType: CoinType) {
   BITCOINCASH(CoinType.BITCOINCASH),
   DOGECOIN(CoinType.DOGECOIN),
   LITECOIN(CoinType.LITECOIN),
-  XRP(CoinType.XRP);
+  XRP(CoinType.XRP),
+  COSMOS(CoinType.COSMOS);
 
   val symbol: String get() = when (this) {
     ETHEREUM -> "ETH"; BNB -> "BNB"; POLYGON -> "POL"
     AVAX -> "AVAX"; BASE -> "ETH"; ARBITRUM -> "ETH"; OPTIMISM -> "ETH"; SONIC -> "S"
     SOLANA -> "SOL"; TRON -> "TRX"; TON -> "TON"
     BITCOIN -> "BTC"; BITCOINCASH -> "BCH"; DOGECOIN -> "DOGE"; LITECOIN -> "LTC"; XRP -> "XRP"
+    COSMOS -> "ATOM"
   }
 
   companion object {
@@ -144,6 +147,7 @@ object ChainSigner {
     ChainKey.XRP -> ChainSignResult(signXrp(wallet, unsignedTx), null)
     ChainKey.TON -> signTon(wallet, unsignedTx)
     ChainKey.BITCOINCASH -> ChainSignResult(signBch(wallet, unsignedTx), null)
+    ChainKey.COSMOS -> ChainSignResult(signCosmos(wallet, unsignedTx), null)
   }
 
   // MARK: - EVM (ethereum / bnb / polygon)
@@ -432,6 +436,65 @@ object ChainSigner {
     if (output.error != Common.SigningError.OK) throw ChainSigningException("Signing failed: ${output.errorMessage}")
     return ChainSignResult(output.encoded, mapOf("txHash" to output.hash.toByteArray().toHex()))
   }
+
+  // MARK: - Cosmos (ATOM)
+  // unsignedTx: { accountNumber, sequence, chainId, feeAmount, gas, memo, fromAddress, toAddress,
+  //               amount (uatom, decimal string), denom }
+  // Returns output.serialized — ready-to-broadcast JSON for the Cosmos LCD.
+  private fun signCosmos(wallet: HDWallet, unsignedTx: Map<String, Any>): String {
+    val privateKey = wallet.getKeyForCoin(CoinType.COSMOS)
+    val fromAddress = unsignedTx["fromAddress"] as? String ?: throw ChainSigningException("Missing fromAddress")
+    val toAddress = unsignedTx["toAddress"] as? String ?: throw ChainSigningException("Missing toAddress")
+    val amountStr = unsignedTx["amount"] as? String ?: throw ChainSigningException("Missing amount")
+    val feeAmountStr = unsignedTx["feeAmount"] as? String ?: throw ChainSigningException("Missing feeAmount")
+    val denom = unsignedTx["denom"] as? String ?: throw ChainSigningException("Missing denom")
+    val chainId = unsignedTx["chainId"] as? String ?: throw ChainSigningException("Missing chainId")
+    val accountNumber = (unsignedTx["accountNumber"] as? Number)?.toLong() ?: throw ChainSigningException("Missing accountNumber")
+    val sequence = (unsignedTx["sequence"] as? Number)?.toLong() ?: throw ChainSigningException("Missing sequence")
+    val gas = (unsignedTx["gas"] as? Number)?.toLong() ?: throw ChainSigningException("Missing gas")
+    val memo = unsignedTx["memo"] as? String ?: ""
+
+    val sendAmount = Cosmos.Amount.newBuilder()
+      .setAmount(amountStr)
+      .setDenom(denom)
+      .build()
+
+    val sendMsg = Cosmos.Message.Send.newBuilder()
+      .setFromAddress(fromAddress)
+      .setToAddress(toAddress)
+      .addAmounts(sendAmount)
+      .build()
+
+    val message = Cosmos.Message.newBuilder()
+      .setSendCoinsMessage(sendMsg)
+      .build()
+
+    val feeAmount = Cosmos.Amount.newBuilder()
+      .setAmount(feeAmountStr)
+      .setDenom(denom)
+      .build()
+
+    val fee = Cosmos.Fee.newBuilder()
+      .setGas(gas)
+      .addAmounts(feeAmount)
+      .build()
+
+    val input = Cosmos.SigningInput.newBuilder().apply {
+      this.signingMode = Cosmos.SigningMode.Protobuf
+      this.accountNumber = accountNumber
+      this.chainId = chainId
+      this.sequence = sequence
+      this.memo = memo
+      this.fee = fee
+      this.addMessages(message)
+      this.privateKey = ByteString.copyFrom(privateKey.data())
+      this.mode = Cosmos.BroadcastMode.BROADCAST_MODE_SYNC
+    }.build()
+
+    val output = AnySigner.sign(input, CoinType.COSMOS, Cosmos.SigningOutput.parser())
+    if (output.error != Common.SigningError.OK) throw ChainSigningException("Cosmos signing failed: ${output.errorMessage}")
+    return output.serialized
+  }
 }
 
 // Transaction summary helpers (used by ChainberryTrustWalletCoreModule for native confirmation UI)
@@ -492,6 +555,15 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
         val sats = descriptor.optLong("sendAmountSats", -1L)
         if (sats >= 0) lines += "Amount: ${fmtAmt(sats.toDouble() / 1e8)} BCH"
       } catch (_: Exception) {}
+    }
+    ChainKey.COSMOS -> {
+      (unsignedTx["toAddress"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
+      (unsignedTx["amount"] as? String)?.toLongOrNull()?.let {
+        lines += "Amount: ${fmtAmt(it.toDouble() / 1_000_000.0)} ATOM"
+      }
+      (unsignedTx["feeAmount"] as? String)?.toLongOrNull()?.let {
+        lines += "Fee: ${fmtAmt(it.toDouble() / 1_000_000.0)} ATOM"
+      }
     }
   }
   return lines.joinToString("\n")
