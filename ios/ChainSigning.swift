@@ -11,6 +11,7 @@ enum ChainKey: String, CaseIterable {
   case bitcoin, bitcoincash, dogecoin, litecoin
   case xrp
   case cosmos
+  case aptos
 
   init(fromJs raw: String) throws {
     guard let key = ChainKey(rawValue: raw) else {
@@ -38,6 +39,7 @@ enum ChainKey: String, CaseIterable {
     case .litecoin: return "LTC"
     case .xrp:      return "XRP"
     case .cosmos:   return "ATOM"
+    case .aptos:    return "APT"
     }
   }
 
@@ -55,6 +57,7 @@ enum ChainKey: String, CaseIterable {
     case .litecoin: return .litecoin
     case .xrp: return .xrp
     case .cosmos: return .cosmos
+    case .aptos: return .aptos
     }
   }
 }
@@ -152,6 +155,8 @@ enum ChainSigner {
       return Result(signedTx: try signBch(wallet: wallet, txParams: unsignedTx), meta: nil)
     case .cosmos:
       return Result(signedTx: try signCosmos(wallet: wallet, txParams: unsignedTx), meta: nil)
+    case .aptos:
+      return Result(signedTx: try signAptos(wallet: wallet, txParams: unsignedTx), meta: nil)
     }
   }
 
@@ -558,6 +563,48 @@ enum ChainSigner {
     return output.serialized
   }
 
+  // MARK: - Aptos (APT)
+  // txParams: { sender, sequenceNumber, maxGasAmount, gasUnitPrice, expirationTimestampSecs,
+  //             chainId, toAddress, amount (octas, decimal string) }
+  // Returns output.json — the signed JSON body posted directly to the Aptos REST API.
+  private static func signAptos(wallet: HDWallet, txParams: [String: Any]) throws -> String {
+    guard let sender = txParams["sender"] as? String,
+          let toAddress = txParams["toAddress"] as? String,
+          let amountStr = txParams["amount"] as? String,
+          let seqNum = txParams["sequenceNumber"] as? NSNumber,
+          let maxGas = txParams["maxGasAmount"] as? NSNumber,
+          let gasPrice = txParams["gasUnitPrice"] as? NSNumber,
+          let expiry = txParams["expirationTimestampSecs"] as? NSNumber,
+          let chainId = txParams["chainId"] as? NSNumber else {
+      throw Exception(name: "InvalidParams", description: "Missing required Aptos tx params")
+    }
+    guard let amountOctas = UInt64(amountStr) else {
+      throw Exception(name: "InvalidParams", description: "Invalid Aptos amount: \(amountStr)")
+    }
+
+    let privateKey = wallet.getKeyForCoin(coin: .aptos)
+
+    var transfer = AptosTransferMessage()
+    transfer.to = toAddress
+    transfer.amount = amountOctas
+
+    var input = AptosSigningInput()
+    input.sender = sender
+    input.sequenceNumber = Int64(seqNum.intValue)
+    input.maxGasAmount = UInt64(maxGas.intValue)
+    input.gasUnitPrice = UInt64(gasPrice.intValue)
+    input.expirationTimestampSecs = UInt64(expiry.intValue)
+    input.chainID = UInt32(chainId.intValue)
+    input.privateKey = privateKey.data
+    input.transfer = transfer
+
+    let output: AptosSigningOutput = AnySigner.sign(input: input, coin: .aptos)
+    guard output.error == .ok else {
+      throw Exception(name: "SigningFailed", description: output.errorMessage)
+    }
+    return output.json
+  }
+
   // MARK: - Transaction summary for native confirmation UI
 
   static func buildSummary(chain: ChainKey, unsignedTx: [String: Any]) -> String {
@@ -625,6 +672,17 @@ enum ChainSigner {
       }
       if let feeUatom = (unsignedTx["feeAmount"] as? String).flatMap(Int64.init) {
         lines.append("Fee: \(fmtAmt(Double(feeUatom) / 1_000_000)) ATOM")
+      }
+
+    case .aptos:
+      if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+      if let octas = (unsignedTx["amount"] as? String).flatMap(UInt64.init) {
+        lines.append("Amount: \(fmtAmt(Double(octas) / 1e8)) APT")
+      }
+      if let maxGas = (unsignedTx["maxGasAmount"] as? NSNumber)?.uint64Value,
+         let gasPrice = (unsignedTx["gasUnitPrice"] as? NSNumber)?.uint64Value {
+        let feeOctas = maxGas * gasPrice
+        lines.append("Max fee: \(fmtAmt(Double(feeOctas) / 1e8)) APT")
       }
     }
     return lines.joined(separator: "\n")
