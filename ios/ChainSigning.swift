@@ -11,6 +11,8 @@ enum ChainKey: String, CaseIterable {
   case bitcoin, bitcoincash, dogecoin, litecoin
   case xrp
   case cosmos
+  case aptos
+  case tezos
 
   init(fromJs raw: String) throws {
     guard let key = ChainKey(rawValue: raw) else {
@@ -38,6 +40,8 @@ enum ChainKey: String, CaseIterable {
     case .litecoin: return "LTC"
     case .xrp:      return "XRP"
     case .cosmos:   return "ATOM"
+    case .aptos:    return "APT"
+    case .tezos:    return "XTZ"
     }
   }
 
@@ -55,6 +59,8 @@ enum ChainKey: String, CaseIterable {
     case .litecoin: return .litecoin
     case .xrp: return .xrp
     case .cosmos: return .cosmos
+    case .aptos: return .aptos
+    case .tezos: return .tezos
     }
   }
 }
@@ -152,6 +158,10 @@ enum ChainSigner {
       return Result(signedTx: try signBch(wallet: wallet, txParams: unsignedTx), meta: nil)
     case .cosmos:
       return Result(signedTx: try signCosmos(wallet: wallet, txParams: unsignedTx), meta: nil)
+    case .aptos:
+      return Result(signedTx: try signAptos(wallet: wallet, txParams: unsignedTx), meta: nil)
+    case .tezos:
+      return Result(signedTx: try signTezos(wallet: wallet, txParams: unsignedTx), meta: nil)
     }
   }
 
@@ -558,6 +568,114 @@ enum ChainSigner {
     return output.serialized
   }
 
+  // MARK: - Aptos (APT)
+  // txParams: { sender, sequenceNumber, maxGasAmount, gasUnitPrice, expirationTimestampSecs,
+  //             chainId, toAddress, amount (octas, decimal string) }
+  // Returns output.json — the signed JSON body posted directly to the Aptos REST API.
+  private static func signAptos(wallet: HDWallet, txParams: [String: Any]) throws -> String {
+    guard let sender = txParams["sender"] as? String,
+          let toAddress = txParams["toAddress"] as? String,
+          let amountStr = txParams["amount"] as? String,
+          let seqNum = txParams["sequenceNumber"] as? NSNumber,
+          let maxGas = txParams["maxGasAmount"] as? NSNumber,
+          let gasPrice = txParams["gasUnitPrice"] as? NSNumber,
+          let expiry = txParams["expirationTimestampSecs"] as? NSNumber,
+          let chainId = txParams["chainId"] as? NSNumber else {
+      throw Exception(name: "InvalidParams", description: "Missing required Aptos tx params")
+    }
+    guard let amountOctas = UInt64(amountStr) else {
+      throw Exception(name: "InvalidParams", description: "Invalid Aptos amount: \(amountStr)")
+    }
+
+    let privateKey = wallet.getKeyForCoin(coin: .aptos)
+
+    var transfer = AptosTransferMessage()
+    transfer.to = toAddress
+    transfer.amount = amountOctas
+
+    var input = AptosSigningInput()
+    input.sender = sender
+    input.sequenceNumber = Int64(seqNum.intValue)
+    input.maxGasAmount = UInt64(maxGas.intValue)
+    input.gasUnitPrice = UInt64(gasPrice.intValue)
+    input.expirationTimestampSecs = UInt64(expiry.intValue)
+    input.chainID = UInt32(chainId.intValue)
+    input.privateKey = privateKey.data
+    input.transfer = transfer
+
+    let output: AptosSigningOutput = AnySigner.sign(input: input, coin: .aptos)
+    guard output.error == .ok else {
+      throw Exception(name: "SigningFailed", description: output.errorMessage)
+    }
+    return output.json
+  }
+
+  // MARK: - Tezos (XTZ)
+  // txParams: { branch, fromAddress, toAddress, counter, amount (mutez), fee (mutez),
+  //             gasLimit, storageLimit, needsReveal }
+  // Returns output.encoded hex — posted to /injection/operation as a JSON-encoded string.
+  private static func signTezos(wallet: HDWallet, txParams: [String: Any]) throws -> String {
+    guard let branch = txParams["branch"] as? String,
+          let fromAddress = txParams["fromAddress"] as? String,
+          let toAddress = txParams["toAddress"] as? String,
+          let counterNum = txParams["counter"] as? NSNumber,
+          let amountNum = txParams["amount"] as? NSNumber,
+          let feeNum = txParams["fee"] as? NSNumber,
+          let gasLimitNum = txParams["gasLimit"] as? NSNumber,
+          let storageLimitNum = txParams["storageLimit"] as? NSNumber else {
+      throw Exception(name: "InvalidParams", description: "Missing required Tezos tx params")
+    }
+    let needsReveal = (txParams["needsReveal"] as? Bool) ?? false
+    let counter = counterNum.int64Value
+
+    let privateKey = wallet.getKeyForCoin(coin: .tezos)
+    var operations: [TezosOperation] = []
+
+    if needsReveal {
+      let pubKey = privateKey.getPublicKeyEd25519()
+      var revealData = TezosRevealOperationData()
+      revealData.publicKey = pubKey.data
+
+      var reveal = TezosOperation()
+      reveal.source = fromAddress
+      reveal.counter = counter - 1
+      reveal.fee = 1420
+      reveal.gasLimit = 10600
+      reveal.storageLimit = 0
+      reveal.kind = .reveal
+      reveal.revealOperationData = revealData
+      operations.append(reveal)
+    }
+
+    var txData = TezosTransactionOperationData()
+    txData.destination = toAddress
+    txData.amount = amountNum.int64Value
+
+    var txOp = TezosOperation()
+    txOp.source = fromAddress
+    txOp.counter = counter
+    txOp.fee = feeNum.int64Value
+    txOp.gasLimit = gasLimitNum.int64Value
+    txOp.storageLimit = storageLimitNum.int64Value
+    txOp.kind = .transaction
+    txOp.transactionOperationData = txData
+    operations.append(txOp)
+
+    var opList = TezosOperationList()
+    opList.branch = branch
+    opList.operations = operations
+
+    var input = TezosSigningInput()
+    input.operationList = opList
+    input.privateKey = privateKey.data
+
+    let output: TezosSigningOutput = AnySigner.sign(input: input, coin: .tezos)
+    guard output.error == .ok else {
+      throw Exception(name: "SigningFailed", description: output.errorMessage)
+    }
+    return output.encoded.hexString
+  }
+
   // MARK: - Transaction summary for native confirmation UI
 
   static func buildSummary(chain: ChainKey, unsignedTx: [String: Any]) -> String {
@@ -625,6 +743,29 @@ enum ChainSigner {
       }
       if let feeUatom = (unsignedTx["feeAmount"] as? String).flatMap(Int64.init) {
         lines.append("Fee: \(fmtAmt(Double(feeUatom) / 1_000_000)) ATOM")
+      }
+
+    case .aptos:
+      if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+      if let octas = (unsignedTx["amount"] as? String).flatMap(UInt64.init) {
+        lines.append("Amount: \(fmtAmt(Double(octas) / 1e8)) APT")
+      }
+      if let maxGas = (unsignedTx["maxGasAmount"] as? NSNumber)?.uint64Value,
+         let gasPrice = (unsignedTx["gasUnitPrice"] as? NSNumber)?.uint64Value {
+        let feeOctas = maxGas * gasPrice
+        lines.append("Max fee: \(fmtAmt(Double(feeOctas) / 1e8)) APT")
+      }
+
+    case .tezos:
+      if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+      if let mutez = (unsignedTx["amount"] as? NSNumber)?.int64Value {
+        lines.append("Amount: \(fmtAmt(Double(mutez) / 1_000_000)) XTZ")
+      }
+      if let feeMutez = (unsignedTx["fee"] as? NSNumber)?.int64Value {
+        lines.append("Fee: \(fmtAmt(Double(feeMutez) / 1_000_000)) XTZ")
+      }
+      if let reveal = unsignedTx["needsReveal"] as? Bool, reveal {
+        lines.append("(includes reveal operation)")
       }
     }
     return lines.joined(separator: "\n")
