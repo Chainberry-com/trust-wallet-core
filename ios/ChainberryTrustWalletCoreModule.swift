@@ -81,6 +81,23 @@ public class ChainberryTrustWalletCoreModule: Module {
         guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: "") else {
           throw Exception(name: "InvalidMnemonic", description: "Stored mnemonic failed validation")
         }
+        // Backfill any addresses that were missing when the wallet was first stored
+        // (e.g. chains added after the wallet was created). Runs silently after the
+        // biometric gate — no extra prompt needed.
+        var metadata = try NativeWalletStore.loadMetadata()
+        if var storedAddresses = metadata[id] {
+          var changed = false
+          for chain in ChainKey.allCases {
+            if storedAddresses[chain.rawValue] == nil {
+              storedAddresses[chain.rawValue] = ChainSigner.address(for: chain, wallet: wallet, isTestnet: isTestnet)
+              changed = true
+            }
+          }
+          if changed {
+            metadata[id] = storedAddresses
+            try? NativeWalletStore.saveMetadata(metadata)
+          }
+        }
         let result = try ChainSigner.sign(chain: chainKey, wallet: wallet, unsignedTx: unsignedTx, isTestnet: isTestnet)
         var response: [String: Any] = ["signedTx": result.signedTx]
         if let meta = result.meta { response["meta"] = meta }
