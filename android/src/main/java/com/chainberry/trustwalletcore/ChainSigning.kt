@@ -15,6 +15,9 @@ import wallet.core.jni.SolanaTransaction
 import wallet.core.jni.TransactionDecoder
 import wallet.core.jni.proto.Bitcoin
 import wallet.core.jni.proto.Common
+import wallet.core.jni.proto.Aptos
+import wallet.core.jni.proto.Cosmos
+import wallet.core.jni.proto.Tezos
 import wallet.core.jni.proto.Ethereum
 import wallet.core.jni.proto.Ripple
 import wallet.core.jni.proto.Solana
@@ -51,13 +54,19 @@ enum class ChainKey(val coinType: CoinType) {
   BITCOINCASH(CoinType.BITCOINCASH),
   DOGECOIN(CoinType.DOGECOIN),
   LITECOIN(CoinType.LITECOIN),
-  XRP(CoinType.XRP);
+  XRP(CoinType.XRP),
+  COSMOS(CoinType.COSMOS),
+  APTOS(CoinType.APTOS),
+  TEZOS(CoinType.TEZOS);
 
   val symbol: String get() = when (this) {
     ETHEREUM -> "ETH"; BNB -> "BNB"; POLYGON -> "POL"
     AVAX -> "AVAX"; BASE -> "ETH"; ARBITRUM -> "ETH"; OPTIMISM -> "ETH"; SONIC -> "S"
     SOLANA -> "SOL"; TRON -> "TRX"; TON -> "TON"
     BITCOIN -> "BTC"; BITCOINCASH -> "BCH"; DOGECOIN -> "DOGE"; LITECOIN -> "LTC"; XRP -> "XRP"
+    COSMOS -> "ATOM"
+    APTOS -> "APT"
+    TEZOS -> "XTZ"
   }
 
   companion object {
@@ -144,6 +153,9 @@ object ChainSigner {
     ChainKey.XRP -> ChainSignResult(signXrp(wallet, unsignedTx), null)
     ChainKey.TON -> signTon(wallet, unsignedTx)
     ChainKey.BITCOINCASH -> ChainSignResult(signBch(wallet, unsignedTx), null)
+    ChainKey.COSMOS -> ChainSignResult(signCosmos(wallet, unsignedTx), null)
+    ChainKey.APTOS -> ChainSignResult(signAptos(wallet, unsignedTx), null)
+    ChainKey.TEZOS -> ChainSignResult(signTezos(wallet, unsignedTx), null)
   }
 
   // MARK: - EVM (ethereum / bnb / polygon)
@@ -432,6 +444,170 @@ object ChainSigner {
     if (output.error != Common.SigningError.OK) throw ChainSigningException("Signing failed: ${output.errorMessage}")
     return ChainSignResult(output.encoded, mapOf("txHash" to output.hash.toByteArray().toHex()))
   }
+
+  // MARK: - Cosmos (ATOM)
+  // unsignedTx: { accountNumber, sequence, chainId, feeAmount, gas, memo, fromAddress, toAddress,
+  //               amount (uatom, decimal string), denom }
+  // Returns output.serialized — ready-to-broadcast JSON for the Cosmos LCD.
+  private fun signCosmos(wallet: HDWallet, unsignedTx: Map<String, Any>): String {
+    val privateKey = wallet.getKeyForCoin(CoinType.COSMOS)
+    val fromAddress = unsignedTx["fromAddress"] as? String ?: throw ChainSigningException("Missing fromAddress")
+    val toAddress = unsignedTx["toAddress"] as? String ?: throw ChainSigningException("Missing toAddress")
+    val amountStr = unsignedTx["amount"] as? String ?: throw ChainSigningException("Missing amount")
+    val feeAmountStr = unsignedTx["feeAmount"] as? String ?: throw ChainSigningException("Missing feeAmount")
+    val denom = unsignedTx["denom"] as? String ?: throw ChainSigningException("Missing denom")
+    val chainId = unsignedTx["chainId"] as? String ?: throw ChainSigningException("Missing chainId")
+    val accountNumber = (unsignedTx["accountNumber"] as? Number)?.toLong() ?: throw ChainSigningException("Missing accountNumber")
+    val sequence = (unsignedTx["sequence"] as? Number)?.toLong() ?: throw ChainSigningException("Missing sequence")
+    val gas = (unsignedTx["gas"] as? Number)?.toLong() ?: throw ChainSigningException("Missing gas")
+    val memo = unsignedTx["memo"] as? String ?: ""
+
+    val sendAmount = Cosmos.Amount.newBuilder()
+      .setAmount(amountStr)
+      .setDenom(denom)
+      .build()
+
+    val sendMsg = Cosmos.Message.Send.newBuilder()
+      .setFromAddress(fromAddress)
+      .setToAddress(toAddress)
+      .addAmounts(sendAmount)
+      .build()
+
+    val message = Cosmos.Message.newBuilder()
+      .setSendCoinsMessage(sendMsg)
+      .build()
+
+    val feeAmount = Cosmos.Amount.newBuilder()
+      .setAmount(feeAmountStr)
+      .setDenom(denom)
+      .build()
+
+    val fee = Cosmos.Fee.newBuilder()
+      .setGas(gas)
+      .addAmounts(feeAmount)
+      .build()
+
+    val input = Cosmos.SigningInput.newBuilder().apply {
+      this.signingMode = Cosmos.SigningMode.Protobuf
+      this.accountNumber = accountNumber
+      this.chainId = chainId
+      this.sequence = sequence
+      this.memo = memo
+      this.fee = fee
+      this.addMessages(message)
+      this.privateKey = ByteString.copyFrom(privateKey.data())
+      this.mode = Cosmos.BroadcastMode.BROADCAST_MODE_SYNC
+    }.build()
+
+    val output = AnySigner.sign(input, CoinType.COSMOS, Cosmos.SigningOutput.parser())
+    if (output.error != Common.SigningError.OK) throw ChainSigningException("Cosmos signing failed: ${output.errorMessage}")
+    return output.serialized
+  }
+
+  // MARK: - Aptos (APT)
+  // unsignedTx: { sender, sequenceNumber, maxGasAmount, gasUnitPrice, expirationTimestampSecs,
+  //              chainId, toAddress, amount (octas, decimal string) }
+  // Returns output.json — the signed JSON body posted directly to the Aptos REST API.
+  private fun signAptos(wallet: HDWallet, unsignedTx: Map<String, Any>): String {
+    val privateKey = wallet.getKeyForCoin(CoinType.APTOS)
+    val sender = unsignedTx["sender"] as? String ?: throw ChainSigningException("Missing sender")
+    val toAddress = unsignedTx["toAddress"] as? String ?: throw ChainSigningException("Missing toAddress")
+    val amountStr = unsignedTx["amount"] as? String ?: throw ChainSigningException("Missing amount")
+    val sequenceNumber = (unsignedTx["sequenceNumber"] as? Number)?.toLong() ?: throw ChainSigningException("Missing sequenceNumber")
+    val maxGasAmount = (unsignedTx["maxGasAmount"] as? Number)?.toLong() ?: throw ChainSigningException("Missing maxGasAmount")
+    val gasUnitPrice = (unsignedTx["gasUnitPrice"] as? Number)?.toLong() ?: throw ChainSigningException("Missing gasUnitPrice")
+    val expirationTimestampSecs = (unsignedTx["expirationTimestampSecs"] as? Number)?.toLong() ?: throw ChainSigningException("Missing expirationTimestampSecs")
+    val chainId = (unsignedTx["chainId"] as? Number)?.toInt() ?: throw ChainSigningException("Missing chainId")
+    val amountOctas = amountStr.toLongOrNull() ?: throw ChainSigningException("Invalid Aptos amount: $amountStr")
+
+    val transfer = Aptos.TransferMessage.newBuilder()
+      .setTo(toAddress)
+      .setAmount(amountOctas)
+      .build()
+
+    val input = Aptos.SigningInput.newBuilder()
+      .setSender(sender)
+      .setSequenceNumber(sequenceNumber)
+      .setMaxGasAmount(maxGasAmount)
+      .setGasUnitPrice(gasUnitPrice)
+      .setExpirationTimestampSecs(expirationTimestampSecs)
+      .setChainId(chainId)
+      .setPrivateKey(ByteString.copyFrom(privateKey.data()))
+      .setTransfer(transfer)
+      .build()
+
+    val output = AnySigner.sign(input, CoinType.APTOS, Aptos.SigningOutput.parser())
+    if (output.error != Common.SigningError.OK) throw ChainSigningException("Aptos signing failed: ${output.errorMessage}")
+    return output.json
+  }
+
+  // MARK: - Tezos (XTZ)
+  // unsignedTx: { branch, fromAddress, toAddress, counter, amount (mutez), fee (mutez),
+  //              gasLimit, storageLimit, needsReveal }
+  // Returns output.encoded hex — broadcast via POST /injection/operation as JSON-encoded string.
+  private fun signTezos(wallet: HDWallet, unsignedTx: Map<String, Any>): String {
+    val privateKey = wallet.getKeyForCoin(CoinType.TEZOS)
+    val branch = unsignedTx["branch"] as? String ?: throw ChainSigningException("Missing branch")
+    val fromAddress = unsignedTx["fromAddress"] as? String ?: throw ChainSigningException("Missing fromAddress")
+    val toAddress = unsignedTx["toAddress"] as? String ?: throw ChainSigningException("Missing toAddress")
+    val counter = (unsignedTx["counter"] as? Number)?.toLong() ?: throw ChainSigningException("Missing counter")
+    val amount = (unsignedTx["amount"] as? Number)?.toLong() ?: throw ChainSigningException("Missing amount")
+    val fee = (unsignedTx["fee"] as? Number)?.toLong() ?: throw ChainSigningException("Missing fee")
+    val gasLimit = (unsignedTx["gasLimit"] as? Number)?.toLong() ?: throw ChainSigningException("Missing gasLimit")
+    val storageLimit = (unsignedTx["storageLimit"] as? Number)?.toLong() ?: throw ChainSigningException("Missing storageLimit")
+    val needsReveal = unsignedTx["needsReveal"] as? Boolean ?: false
+
+    val operations = mutableListOf<Tezos.Operation>()
+
+    if (needsReveal) {
+      val pubKey = privateKey.getPublicKeyEd25519()
+      val revealData = Tezos.RevealOperationData.newBuilder()
+        .setPublicKey(ByteString.copyFrom(pubKey.data()))
+        .build()
+      operations.add(
+        Tezos.Operation.newBuilder()
+          .setSource(fromAddress)
+          .setCounter(counter - 1)
+          .setFee(1420L)
+          .setGasLimit(10600L)
+          .setStorageLimit(0L)
+          .setKind(Tezos.Operation.OperationKind.REVEAL)
+          .setRevealOperationData(revealData)
+          .build()
+      )
+    }
+
+    val txData = Tezos.TransactionOperationData.newBuilder()
+      .setDestination(toAddress)
+      .setAmount(amount)
+      .build()
+
+    operations.add(
+      Tezos.Operation.newBuilder()
+        .setSource(fromAddress)
+        .setCounter(counter)
+        .setFee(fee)
+        .setGasLimit(gasLimit)
+        .setStorageLimit(storageLimit)
+        .setKind(Tezos.Operation.OperationKind.TRANSACTION)
+        .setTransactionOperationData(txData)
+        .build()
+    )
+
+    val opList = Tezos.OperationList.newBuilder()
+      .setBranch(branch)
+      .addAllOperations(operations)
+      .build()
+
+    val input = Tezos.SigningInput.newBuilder()
+      .setOperationList(opList)
+      .setPrivateKey(ByteString.copyFrom(privateKey.data()))
+      .build()
+
+    val output = AnySigner.sign(input, CoinType.TEZOS, Tezos.SigningOutput.parser())
+    if (output.error != Common.SigningError.OK) throw ChainSigningException("Tezos signing failed: ${output.errorMessage}")
+    return output.encoded.toByteArray().toHex()
+  }
 }
 
 // Transaction summary helpers (used by ChainberryTrustWalletCoreModule for native confirmation UI)
@@ -492,6 +668,36 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
         val sats = descriptor.optLong("sendAmountSats", -1L)
         if (sats >= 0) lines += "Amount: ${fmtAmt(sats.toDouble() / 1e8)} BCH"
       } catch (_: Exception) {}
+    }
+    ChainKey.COSMOS -> {
+      (unsignedTx["toAddress"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
+      (unsignedTx["amount"] as? String)?.toLongOrNull()?.let {
+        lines += "Amount: ${fmtAmt(it.toDouble() / 1_000_000.0)} ATOM"
+      }
+      (unsignedTx["feeAmount"] as? String)?.toLongOrNull()?.let {
+        lines += "Fee: ${fmtAmt(it.toDouble() / 1_000_000.0)} ATOM"
+      }
+    }
+    ChainKey.APTOS -> {
+      (unsignedTx["toAddress"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
+      (unsignedTx["amount"] as? String)?.toLongOrNull()?.let {
+        lines += "Amount: ${fmtAmt(it.toDouble() / 1e8)} APT"
+      }
+      val maxGas = (unsignedTx["maxGasAmount"] as? Number)?.toLong()
+      val gasPrice = (unsignedTx["gasUnitPrice"] as? Number)?.toLong()
+      if (maxGas != null && gasPrice != null) {
+        lines += "Max fee: ${fmtAmt((maxGas * gasPrice).toDouble() / 1e8)} APT"
+      }
+    }
+    ChainKey.TEZOS -> {
+      (unsignedTx["toAddress"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
+      (unsignedTx["amount"] as? Number)?.toLong()?.let {
+        lines += "Amount: ${fmtAmt(it.toDouble() / 1_000_000.0)} XTZ"
+      }
+      (unsignedTx["fee"] as? Number)?.toLong()?.let {
+        lines += "Fee: ${fmtAmt(it.toDouble() / 1_000_000.0)} XTZ"
+      }
+      if (unsignedTx["needsReveal"] == true) lines += "(includes reveal operation)"
     }
   }
   return lines.joinToString("\n")
