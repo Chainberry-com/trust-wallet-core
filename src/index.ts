@@ -25,7 +25,8 @@ export type Chain =
   | "litecoin"
   | "xrp"
   | "cosmos"
-  | "aptos";
+  | "aptos"
+  | "tezos";
 
 export type WalletSummary = {
   walletId: string;
