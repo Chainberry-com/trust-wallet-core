@@ -165,7 +165,7 @@ enum ChainSigner {
     // TW's sanctioned path. We pass the same blockhash back (no-op refresh) so the
     // tx content is unchanged — only the signature is added.
     let decodedData = TransactionDecoder.decode(coinType: .solana, encodedTx: txData)
-    let decoded = try SolanaDecodingTransactionOutput(serializedData: decodedData)
+    let decoded = try SolanaDecodingTransactionOutput(serializedBytes: decodedData)
     guard decoded.error == .ok else {
       throw Exception(name: "DecodingFailed", description: "Failed to decode SOL tx: \(decoded.errorMessage)")
     }
@@ -173,12 +173,10 @@ enum ChainSigner {
 
     let privateKeys = DataVector()
     privateKeys.add(data: privateKey.data)
-    guard let outputData = SolanaTransaction.updateBlockhashAndSign(
+    let outputData = SolanaTransaction.updateBlockhashAndSign(
       encodedTx: unsignedTxBase64, recentBlockhash: recentBlockhash, privateKeys: privateKeys
-    ) else {
-      throw Exception(name: "SigningFailed", description: "SolanaTransaction.updateBlockhashAndSign returned nil")
-    }
-    let output = try SolanaSigningOutput(serializedData: outputData)
+    )
+    let output = try SolanaSigningOutput(serializedBytes: outputData)
     guard output.error == .ok else {
       throw Exception(name: "SigningFailed", description: output.errorMessage)
     }
@@ -254,26 +252,29 @@ enum ChainSigner {
   private static func signTron(wallet: HDWallet, txParams: [String: Any]) throws -> String {
     let privateKey = wallet.getKeyForCoin(coin: .tron)
 
-    // Pass the full TronGrid unsigned tx JSON via rawJson — wallet-core's direct-sign path
-    // reads txID from the JSON and signs that digest, returning the complete signed tx in output.json.
+    // Sign via txID — wallet-core reads the txID digest and signs it directly.
     // This covers both plain TRX transfers and TRC20 triggerSmartContract payloads.
-    guard JSONSerialization.isValidJSONObject(txParams) else {
-      throw Exception(name: "InvalidParams", description: "TRX tx is not JSON-serializable")
-    }
-    let jsonData = try JSONSerialization.data(withJSONObject: txParams)
-    guard let jsonStr = String(data: jsonData, encoding: .utf8) else {
-      throw Exception(name: "InvalidParams", description: "TRX tx JSON encoding failed")
+    guard let txID = txParams["txID"] as? String else {
+      throw Exception(name: "InvalidParams", description: "Missing txID in TRX tx params")
     }
 
     var input = TronSigningInput()
     input.privateKey = privateKey.data
-    input.rawJson = jsonStr
+    input.txID = txID
 
     let output: TronSigningOutput = AnySigner.sign(input: input, coin: .tron)
     guard output.error == .ok else {
       throw Exception(name: "SigningFailed", description: output.errorMessage)
     }
-    return output.json
+
+    // Reconstruct the full TronGrid broadcast payload with the signature appended.
+    var broadcastTx = txParams
+    broadcastTx["signature"] = [output.signature.hexString]
+    let broadcastData = try JSONSerialization.data(withJSONObject: broadcastTx)
+    guard let broadcastJson = String(data: broadcastData, encoding: .utf8) else {
+      throw Exception(name: "EncodingFailed", description: "TRX broadcast tx JSON encoding failed")
+    }
+    return broadcastJson
   }
 
   // MARK: - XRP
@@ -298,15 +299,15 @@ enum ChainSigner {
     payment.amount = try parseXrpAmountDrops(amountDrops)
     payment.destination = destination
     if let resolvedTag = try parseXrpDestinationTag(destinationTag) {
-      payment.destinationTag = resolvedTag
+      payment.destinationTag = Int64(resolvedTag)
     }
 
     var input = RippleSigningInput()
     input.privateKey = privateKey.data
     input.account = account
     input.fee = try parseXrpFeeDrops(feeDrops)
-    input.sequence = UInt32(sequence)
-    if let lls = lastLedgerSequence { input.lastLedgerSequence = UInt32(lls) }
+    input.sequence = Int32(sequence)
+    if let lls = lastLedgerSequence { input.lastLedgerSequence = Int32(lls) }
     input.opPayment = payment
 
     let output: RippleSigningOutput = AnySigner.sign(input: input, coin: .xrp)
@@ -334,14 +335,11 @@ enum ChainSigner {
 
     let privateKey = wallet.getKeyForCoin(coin: .ton)
 
-    // amount is Data (uint128 big-endian); encode the nanoton UInt64 as 8 big-endian bytes.
     let nanotons = try parseTonNanotons(amountStr)
-    var bigEndianNano = nanotons.bigEndian
-    let amountData = withUnsafeBytes(of: &bigEndianNano) { Data($0) }
 
     var transfer = TheOpenNetworkTransfer()
     transfer.dest = toAddress
-    transfer.amount = amountData
+    transfer.amount = nanotons
     transfer.mode = UInt32(TheOpenNetworkSendMode.payFeesSeparately.rawValue | TheOpenNetworkSendMode.ignoreActionPhaseErrors.rawValue)
     transfer.bounceable = true
     if let memoId { transfer.comment = memoId }
