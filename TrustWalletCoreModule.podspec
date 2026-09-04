@@ -10,7 +10,7 @@ Pod::Spec.new do |s|
   s.homepage       = 'https://github.com/Chainberry-com/trust-wallet-core'
   s.license        = package['license']
   s.author         = 'Chainberry'
-  s.platform       = :ios, '16.0'
+  s.platform       = :ios, '15.1'
   s.source         = { git: 'git@github.com:Chainberry-com/trust-wallet-core.git', tag: "v#{package['version']}" }
   s.static_framework = true
 

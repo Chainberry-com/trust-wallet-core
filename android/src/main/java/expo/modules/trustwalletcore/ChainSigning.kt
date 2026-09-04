@@ -312,12 +312,21 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
       )
       val feeWei = gasLimit * gasPrice
       if (feeWei > 0) lines += "Max fee: ${fmtAmt(feeWei / 1e18)} ${chain.symbol}"
+      (unsignedTx["chainId"] as? Number)?.let { lines += "Chain ID: ${it.toInt()}" }
+      (unsignedTx["nonce"] as? Number)?.let { lines += "Nonce: ${it.toInt()}" }
+      val dataHex = (unsignedTx["dataHex"] as? String) ?: ""
+      val stripped = dataHex.removePrefix("0x")
+      if (stripped.isNotEmpty() && stripped != "0") {
+        lines += "Contract data: ${stripped.length / 2} bytes — review carefully"
+      }
     }
     ChainKey.BITCOIN, ChainKey.LITECOIN -> {
       (unsignedTx["toAddress"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
       (unsignedTx["sendAmountSats"] as? String)?.toLongOrNull()?.let {
         lines += "Amount: ${fmtAmt(it.toDouble() / 1e8)} ${chain.symbol}"
       }
+      (unsignedTx["changeAddress"] as? String)?.let { lines += "Change to: ${fmtAddr(it)}" }
+      (unsignedTx["satsPerByte"] as? Number)?.let { lines += "Fee rate: ${it.toInt()} sat/vB" }
     }
     ChainKey.XRP -> {
       (unsignedTx["Destination"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
@@ -334,23 +343,62 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
       (unsignedTx["amount"] as? String)?.toULongOrNull()?.let {
         lines += "Amount: ${fmtAmt(it.toDouble() / 1e9)} TON"
       }
+      (unsignedTx["memoId"] as? String)?.takeIf { it.isNotEmpty() }?.let { lines += "Memo: $it" }
+      lines += "Fee: set by network"
     }
     ChainKey.TRON -> {
       @Suppress("UNCHECKED_CAST")
-      val value = ((unsignedTx["raw_data"] as? Map<String, Any>)
+      val firstContract = (unsignedTx["raw_data"] as? Map<String, Any>)
         ?.let { (it["contract"] as? List<Map<String, Any>>)?.firstOrNull() }
-        ?.let { it["parameter"] as? Map<String, Any> }
-        ?.let { it["value"] as? Map<String, Any> })
-      value?.let { v ->
-        (v["to_address"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
-        (v["amount"] as? Number)?.let { lines += "Amount: ${fmtAmt(it.toDouble() / 1e6)} TRX" }
+      firstContract?.let { contract ->
+        (contract["parameter"] as? Map<String, Any>)
+          ?.let { it["value"] as? Map<String, Any> }
+          ?.let { v ->
+            (v["to_address"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
+            (v["amount"] as? Number)?.let { lines += "Amount: ${fmtAmt(it.toDouble() / 1e6)} TRX" }
+          }
+        (contract["type"] as? String)?.takeIf { it != "TransferContract" }?.let {
+          lines += "Contract type: $it — review carefully"
+        }
+      }
+      (unsignedTx["txID"] as? String)?.let { lines += "TxID: ${it.take(16)}…" }
+    }
+    ChainKey.SOLANA -> {
+      val info = (unsignedTx["unsignedTxBase64"] as? String)?.let { decodeSolanaForSummary(it) }
+      if (info != null) {
+        info.to?.let { lines += "To: ${fmtAddr(it)}" }
+        info.lamports?.let { lines += "Amount: ${fmtAmt(it.toDouble() / 1e9)} SOL" }
+        if (!info.isTransfer) lines += "Non-transfer instruction — review carefully"
+      } else {
+        lines += "Unable to decode transaction — proceed only if you trust the source"
       }
     }
-    ChainKey.SOLANA -> lines += "(Solana — details verified by the network)"
     ChainKey.BITCOINCASH -> {}
   }
   return lines.joinToString("\n")
 }
+
+private data class SolanaSummary(val to: String?, val lamports: ULong?, val isTransfer: Boolean)
+
+private fun decodeSolanaForSummary(b64: String): SolanaSummary? = try {
+  val txBytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+  val decoded = Solana.DecodingTransactionOutput.parseFrom(TransactionDecoder.decode(CoinType.SOLANA, txBytes))
+  if (decoded.error != Common.SigningError.OK) return null
+  val accounts = decoded.transaction.legacy.message.accountKeysList
+  val ix = decoded.transaction.legacy.message.instructionsList.firstOrNull()
+    ?: return SolanaSummary(null, null, false)
+  val to = if (ix.accountsCount >= 2) accounts.getOrNull(ix.accountsList[1]) else null
+  val dataBytes = ix.data.toByteArray()
+  val isTransfer = dataBytes.size >= 12 &&
+    dataBytes[0] == 2.toByte() && dataBytes[1] == 0.toByte() &&
+    dataBytes[2] == 0.toByte() && dataBytes[3] == 0.toByte()
+  val lamports = if (isTransfer) {
+    var v = 0UL
+    for (i in 0..7) v = v or (dataBytes[4 + i].toUByte().toULong() shl (i * 8))
+    v
+  } else null
+  SolanaSummary(to, lamports, isTransfer)
+} catch (_: Exception) { null }
 
 private fun txHexToDouble(hex: String): Double = try {
   BigInteger(hex.removePrefix("0x").ifEmpty { "0" }, 16).toDouble()

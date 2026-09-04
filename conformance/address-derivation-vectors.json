@@ -1,30 +1,35 @@
 {
-  "_note": "Vectors verified against Trust Wallet Core 4.1.19 (the pinned version on both platforms). Test mnemonic is the BIP39 standard test vector — never use with real funds. Add a signing-vectors.json alongside this file when byte-for-byte signed-output parity is established per chain.",
+  "_note": "Vectors verified against Trust Wallet Core 4.1.19 (the pinned version on both platforms). Test mnemonic is the BIP39 standard test vector — never use with real funds.",
+  "_ios_test": "ios/ConformanceTests/AddressDerivationConformanceTests.swift — mirrors Android AddressDerivationConformanceTest.kt. Add to an XCTest target in vault.xcworkspace to run on simulator.",
+  "_android_test": "android/src/androidTest/.../AddressDerivationConformanceTest.kt — run via: ./gradlew connectedDebugAndroidTest",
   "testMnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
   "testPassphrase": "",
   "addressDerivation": [
     {
       "chain": "ethereum",
       "expected": "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F",
-      "status": "verified"
+      "status": "verified",
+      "verifiedOn": ["ios", "android"]
     },
     {
       "chain": "bnb",
       "expected": "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F",
       "status": "verified",
-      "_note": "BNB Smart Chain shares CoinType.ETHEREUM (same secp256k1 key, same BIP44 path m/44'/60'/0'/0/0)"
+      "verifiedOn": ["ios", "android"],
+      "_note": "BNB Smart Chain shares CoinType.ETHEREUM (same secp256k1 key, BIP44 m/44'/60'/0'/0/0)"
     },
     {
       "chain": "polygon",
       "expected": "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F",
       "status": "verified",
-      "_note": "Polygon shares CoinType.ETHEREUM (same secp256k1 key, same BIP44 path m/44'/60'/0'/0/0)"
+      "verifiedOn": ["ios", "android"],
+      "_note": "Polygon shares CoinType.ETHEREUM (same secp256k1 key, BIP44 m/44'/60'/0'/0/0)"
     },
     {
       "chain": "bitcoin",
       "expected": null,
       "status": "pending-verification",
-      "_note": "Run AddressDerivationConformanceTest with status=pending to print the actual 4.1.19 address, then set expected and change status to verified"
+      "_note": "Run testPrintPendingAddressesForVerification (iOS) or printPendingAddressesForVerification (Android), cross-check outputs, then set expected and status=verified"
     },
     {
       "chain": "litecoin",
@@ -39,7 +44,8 @@
     {
       "chain": "tron",
       "expected": null,
-      "status": "pending-verification"
+      "status": "pending-verification",
+      "_signingNote": "iOS and Android TRX signing are now aligned: both use txID from the TronGrid unsigned tx, sign only that digest, then reconstruct the broadcast payload with the signature array appended. Previously iOS used rawJson (removed in 4.1.19)."
     },
     {
       "chain": "ton",
