@@ -373,12 +373,21 @@ enum ChainSigner {
       )
       let fee = gasLimit * gasPrice
       if fee > 0 { lines.append("Max fee: \(fmtAmt(fee / 1e18)) \(chain.symbol)") }
+      if let chainId = unsignedTx["chainId"] as? NSNumber { lines.append("Chain ID: \(chainId.intValue)") }
+      if let nonce = unsignedTx["nonce"] as? NSNumber { lines.append("Nonce: \(nonce.intValue)") }
+      let dataHex = (unsignedTx["dataHex"] as? String) ?? ""
+      let stripped = dataHex.hasPrefix("0x") ? String(dataHex.dropFirst(2)) : dataHex
+      if !stripped.isEmpty && stripped != "0" {
+        lines.append("Contract data: \(stripped.count / 2) bytes — review carefully")
+      }
 
     case .bitcoin, .litecoin:
       if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
       if let sats = (unsignedTx["sendAmountSats"] as? String).flatMap(Int64.init) {
         lines.append("Amount: \(fmtAmt(Double(sats) / 1e8)) \(chain.symbol)")
       }
+      if let change = unsignedTx["changeAddress"] as? String { lines.append("Change to: \(fmtAddr(change))") }
+      if let spb = unsignedTx["satsPerByte"] as? NSNumber { lines.append("Fee rate: \(spb.intValue) sat/vB") }
 
     case .xrp:
       if let dest = unsignedTx["Destination"] as? String { lines.append("To: \(fmtAddr(dest))") }
@@ -395,23 +404,65 @@ enum ChainSigner {
       if let nano = (unsignedTx["amount"] as? String).flatMap(UInt64.init) {
         lines.append("Amount: \(fmtAmt(Double(nano) / 1e9)) TON")
       }
+      if let memo = unsignedTx["memoId"] as? String, !memo.isEmpty { lines.append("Memo: \(memo)") }
+      lines.append("Fee: set by network")
 
     case .tron:
       if let rawData = unsignedTx["raw_data"] as? [String: Any],
          let contracts = rawData["contract"] as? [[String: Any]],
-         let param = contracts.first?["parameter"] as? [String: Any],
-         let value = param["value"] as? [String: Any] {
-        if let to = value["to_address"] as? String { lines.append("To: \(fmtAddr(to))") }
-        if let amount = value["amount"] as? Int { lines.append("Amount: \(fmtAmt(Double(amount) / 1e6)) TRX") }
+         let first = contracts.first {
+        if let param = first["parameter"] as? [String: Any],
+           let value = param["value"] as? [String: Any] {
+          if let to = value["to_address"] as? String { lines.append("To: \(fmtAddr(to))") }
+          if let amount = value["amount"] as? Int { lines.append("Amount: \(fmtAmt(Double(amount) / 1e6)) TRX") }
+        }
+        if let type_ = first["type"] as? String, type_ != "TransferContract" {
+          lines.append("Contract type: \(type_) — review carefully")
+        }
+      }
+      // Show the exact digest being signed so the user can cross-check with the broadcast payload.
+      if let txID = unsignedTx["txID"] as? String {
+        lines.append("TxID: \(txID.prefix(16))…")
       }
 
     case .solana:
-      lines.append("(Solana — details verified by the network)")
+      // Decode the pre-built tx to extract recipient and lamports from the first instruction.
+      // Falls back to an explicit warning instead of the misleading "verified by network" message.
+      if let info = decodeSolanaForSummary(unsignedTx) {
+        if let to = info.to { lines.append("To: \(fmtAddr(to))") }
+        if let lamports = info.lamports { lines.append("Amount: \(fmtAmt(Double(lamports) / 1e9)) SOL") }
+        if !info.isTransfer { lines.append("Non-transfer instruction — review carefully") }
+      } else {
+        lines.append("Unable to decode transaction — proceed only if you trust the source")
+      }
 
     case .bitcoincash:
       break
     }
     return lines.joined(separator: "\n")
+  }
+
+  private static func decodeSolanaForSummary(_ txParams: [String: Any])
+    -> (to: String?, lamports: UInt64?, isTransfer: Bool)? {
+    guard let b64 = txParams["unsignedTxBase64"] as? String,
+          let txData = Data(base64Encoded: b64) else { return nil }
+    let rawBytes = TransactionDecoder.decode(coinType: .solana, encodedTx: txData)
+    guard let decoded = try? SolanaDecodingTransactionOutput(serializedBytes: rawBytes),
+          decoded.error == .ok else { return nil }
+    let accounts = decoded.transaction.legacy.accountKeys
+    let instrs = decoded.transaction.legacy.instructions
+    guard let ix = instrs.first else { return (nil, nil, false) }
+    let to: String? = ix.accounts.count >= 2
+      ? safeGet(accounts, Int(ix.accounts[1]))
+      : nil
+    let isTransfer = ix.programData.count >= 12 && ix.programData.prefix(4) == Data([2, 0, 0, 0])
+    var lamports: UInt64?
+    if isTransfer {
+      var v: UInt64 = 0
+      for (i, b) in ix.programData.dropFirst(4).prefix(8).enumerated() { v |= UInt64(b) << (i * 8) }
+      lamports = v
+    }
+    return (to, lamports, isTransfer)
   }
 
   private static func txHexToDouble(_ hex: String) -> Double {
@@ -430,6 +481,10 @@ enum ChainSigner {
   private static func fmtAddr(_ addr: String) -> String { addr }
 
   // MARK: - Helpers
+
+  private static func safeGet<T>(_ array: [T], _ index: Int) -> T? {
+    array.indices.contains(index) ? array[index] : nil
+  }
 
   // Parses a hex string (with or without 0x, odd or even length) into Data. An empty string
   // deliberately maps to a single zero byte (fields like valueHex already default to "0"
