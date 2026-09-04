@@ -3,6 +3,7 @@ import ExpoModulesCore
 import WalletCore
 
 // All chains this module derives addresses for / signs transactions for.
+
 enum ChainKey: String, CaseIterable {
   case ethereum, bnb, polygon
   case solana
