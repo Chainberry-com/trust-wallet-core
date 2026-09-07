@@ -365,13 +365,12 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
     }
     ChainKey.SOLANA -> {
       val info = (unsignedTx["unsignedTxBase64"] as? String)?.let { decodeSolanaForSummary(it) }
-      if (info != null) {
-        info.to?.let { lines += "To: ${fmtAddr(it)}" }
-        info.lamports?.let { lines += "Amount: ${fmtAmt(it.toDouble() / 1e9)} SOL" }
-        if (!info.isTransfer) lines += "Non-transfer instruction — review carefully"
-      } else {
-        lines += "Unable to decode transaction — proceed only if you trust the source"
-      }
+        ?: throw ChainSigningException(
+          "Cannot decode Solana transaction — signing refused to prevent blind signing"
+        )
+      info.to?.let { lines += "To: ${fmtAddr(it)}" }
+      info.lamports?.let { lines += "Amount: ${fmtAmt(it.toDouble() / 1e9)} SOL" }
+      if (!info.isTransfer) lines += "Non-transfer instruction — review carefully"
     }
     ChainKey.BITCOINCASH -> {}
   }

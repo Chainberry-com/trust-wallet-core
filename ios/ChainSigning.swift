@@ -360,7 +360,7 @@ enum ChainSigner {
 
   // MARK: - Transaction summary for native confirmation UI
 
-  static func buildSummary(chain: ChainKey, unsignedTx: [String: Any]) -> String {
+  static func buildSummary(chain: ChainKey, unsignedTx: [String: Any]) throws -> String {
     var lines = ["Network: \(chain.rawValue.uppercased())"]
     switch chain {
     case .ethereum, .bnb, .polygon:
@@ -428,13 +428,13 @@ enum ChainSigner {
     case .solana:
       // Decode the pre-built tx to extract recipient and lamports from the first instruction.
       // Falls back to an explicit warning instead of the misleading "verified by network" message.
-      if let info = decodeSolanaForSummary(unsignedTx) {
-        if let to = info.to { lines.append("To: \(fmtAddr(to))") }
-        if let lamports = info.lamports { lines.append("Amount: \(fmtAmt(Double(lamports) / 1e9)) SOL") }
-        if !info.isTransfer { lines.append("Non-transfer instruction — review carefully") }
-      } else {
-        lines.append("Unable to decode transaction — proceed only if you trust the source")
+      guard let info = decodeSolanaForSummary(unsignedTx) else {
+        throw Exception(name: "UndecodableTx",
+          description: "Cannot decode Solana transaction — signing refused to prevent blind signing")
       }
+      if let to = info.to { lines.append("To: \(fmtAddr(to))") }
+      if let lamports = info.lamports { lines.append("Amount: \(fmtAmt(Double(lamports) / 1e9)) SOL") }
+      if !info.isTransfer { lines.append("Non-transfer instruction — review carefully") }
 
     case .bitcoincash:
       break

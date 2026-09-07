@@ -14,7 +14,8 @@ Pod::Spec.new do |s|
   s.source         = { git: 'git@github.com:Chainberry-com/trust-wallet-core.git', tag: "v#{package['version']}" }
   s.static_framework = true
 
-  s.source_files = 'ios/**/*.{h,m,mm,swift}'
+  s.source_files         = 'ios/**/*.{h,m,mm,swift}'
+  s.exclude_files        = 'ios/ConformanceTests/**'
 
   s.dependency 'ExpoModulesCore'
   s.dependency 'TrustWalletCore', '4.1.19'
