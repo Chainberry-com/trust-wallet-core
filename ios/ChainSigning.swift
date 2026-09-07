@@ -425,20 +425,41 @@ enum ChainSigner {
       if let nano = (unsignedTx["amount"] as? String).flatMap(UInt64.init) {
         lines.append("Amount: \(fmtAmt(Double(nano) / 1e9)) TON")
       }
-      if let memo = unsignedTx["memoId"] as? String, !memo.isEmpty { lines.append("Memo: \(memo)") }
-      lines.append("Fee: set by network")
+      let memoTon = unsignedTx["memoId"] as? String
+      if let memo = memoTon, !memo.isEmpty { lines.append("Memo: \(memo)") }
+      let feeEst = (memoTon?.isEmpty == false) ? "~0.006" : "~0.005"
+      lines.append("Fee: \(feeEst) TON (estimate)")
 
     case .tron:
       if let rawData = unsignedTx["raw_data"] as? [String: Any],
          let contracts = rawData["contract"] as? [[String: Any]],
          let first = contracts.first {
+        let type_ = first["type"] as? String ?? ""
         if let param = first["parameter"] as? [String: Any],
            let value = param["value"] as? [String: Any] {
-          if let to = value["to_address"] as? String { lines.append("To: \(fmtAddr(to))") }
-          if let amount = value["amount"] as? Int { lines.append("Amount: \(fmtAmt(Double(amount) / 1e6)) TRX") }
-        }
-        if let type_ = first["type"] as? String, type_ != "TransferContract" {
-          lines.append("Contract type: \(type_) — review carefully")
+          switch type_ {
+          case "TransferContract":
+            if let to = value["to_address"] as? String { lines.append("To: \(fmtAddr(to))") }
+            if let amount = value["amount"] as? Int { lines.append("Amount: \(fmtAmt(Double(amount) / 1e6)) TRX") }
+          case "TriggerSmartContract":
+            if let contractAddr = value["contract_address"] as? String {
+              lines.append("Token contract: \(fmtAddr(contractAddr))")
+            }
+            let dataHex = (value["data"] as? String) ?? ""
+            let stripped = dataHex.hasPrefix("0x") ? String(dataHex.dropFirst(2)) : dataHex
+            let sel = stripped.prefix(8).lowercased()
+            if sel == "a9059cbb" && stripped.count >= 136 {
+              // TRC-20 transfer(address, uint256) — ABI encoding identical to EVM
+              let recipientHex = "0x" + String(stripped.dropFirst(32).prefix(40))
+              let amountHex = String(stripped.dropFirst(72).prefix(64)).drop(while: { $0 == "0" })
+              lines.append("TRC-20 to: \(fmtAddr(recipientHex))")
+              lines.append("Token amount (raw units): 0x\(amountHex.isEmpty ? "0" : String(amountHex))")
+            } else {
+              lines.append("Contract call: \(stripped.count / 2) bytes — review carefully")
+            }
+          default:
+            if !type_.isEmpty { lines.append("Contract type: \(type_) — review carefully") }
+          }
         }
       }
       if let txID = unsignedTx["txID"] as? String {
@@ -458,15 +479,20 @@ enum ChainSigner {
       }
 
     case .solana:
-      // Decode the pre-built tx to extract recipient and lamports from the first instruction.
-      // Falls back to an explicit warning instead of the misleading "verified by network" message.
+      // Decode the pre-built tx to extract recipient and lamports (SOL) or destination and
+      // amount (SPL token). Falls closed — throws if the tx cannot be decoded at all.
       guard let info = decodeSolanaForSummary(unsignedTx) else {
         throw Exception(name: "UndecodableTx",
           description: "Cannot decode Solana transaction — signing refused to prevent blind signing")
       }
-      if let to = info.to { lines.append("To: \(fmtAddr(to))") }
-      if let lamports = info.lamports { lines.append("Amount: \(fmtAmt(Double(lamports) / 1e9)) SOL") }
-      if !info.isTransfer { lines.append("Non-transfer instruction — review carefully") }
+      if info.isSplTransfer {
+        if let dest = info.splDest { lines.append("SPL Token to: \(fmtAddr(dest))") }
+        if let amt = info.splAmount { lines.append("SPL Token amount (raw): \(amt)") }
+      } else {
+        if let to = info.to { lines.append("To: \(fmtAddr(to))") }
+        if let lamports = info.lamports { lines.append("Amount: \(fmtAmt(Double(lamports) / 1e9)) SOL") }
+        if !info.isTransfer { lines.append("Non-transfer instruction — review carefully") }
+      }
 
     case .bitcoincash:
       break
@@ -474,8 +500,16 @@ enum ChainSigner {
     return lines.joined(separator: "\n")
   }
 
-  private static func decodeSolanaForSummary(_ txParams: [String: Any])
-    -> (to: String?, lamports: UInt64?, isTransfer: Bool)? {
+  private struct SolanaSummaryInfo {
+    let to: String?
+    let lamports: UInt64?
+    let isTransfer: Bool
+    let splDest: String?
+    let splAmount: UInt64?
+    let isSplTransfer: Bool
+  }
+
+  private static func decodeSolanaForSummary(_ txParams: [String: Any]) -> SolanaSummaryInfo? {
     guard let b64 = txParams["unsignedTxBase64"] as? String,
           let txData = Data(base64Encoded: b64) else { return nil }
     let rawBytes = TransactionDecoder.decode(coinType: .solana, encodedTx: txData)
@@ -483,29 +517,61 @@ enum ChainSigner {
           decoded.error == .ok else { return nil }
     let accounts = decoded.transaction.legacy.accountKeys
     let instrs = decoded.transaction.legacy.instructions
-    // Find the first SystemProgram instruction by verifying the program address.
-    // Skips ComputeBudget and any other leading instructions so they can't be
-    // misclassified as a SOL transfer (ComputeBudget SetComputeUnitLimit also
-    // uses instruction type 2 as a u8 prefix, which superficially resembles the
-    // SystemProgram Transfer discriminator [2,0,0,0] as u32-LE).
+
     let systemProgram = "11111111111111111111111111111111"
-    var targetIx: TW_Solana_Proto_RawMessage.Instruction? = nil
-    for instr in instrs where safeGet(accounts, Int(instr.programID)) == systemProgram {
-      targetIx = instr
-      break
+    // SPL Token Program and Token-2022
+    let splPrograms: Set<String> = [
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+    ]
+
+    // Find first SystemProgram instruction (skip ComputeBudget etc.)
+    // and first SPL Token instruction in a single pass.
+    var systemIx: TW_Solana_Proto_RawMessage.Instruction? = nil
+    var splIx: TW_Solana_Proto_RawMessage.Instruction? = nil
+    for instr in instrs {
+      let prog = safeGet(accounts, Int(instr.programID)) ?? ""
+      if systemIx == nil && prog == systemProgram { systemIx = instr }
+      if splIx == nil && splPrograms.contains(prog) { splIx = instr }
     }
-    guard let ix = targetIx else { return nil }
-    let to: String? = ix.accounts.count >= 2
-      ? safeGet(accounts, Int(ix.accounts[1]))
-      : nil
-    let isTransfer = ix.programData.count >= 12 && ix.programData.prefix(4) == Data([2, 0, 0, 0])
-    var lamports: UInt64?
-    if isTransfer {
-      var v: UInt64 = 0
-      for (i, b) in ix.programData.dropFirst(4).prefix(8).enumerated() { v |= UInt64(b) << (i * 8) }
-      lamports = v
+
+    if let ix = systemIx {
+      let to: String? = ix.accounts.count >= 2 ? safeGet(accounts, Int(ix.accounts[1])) : nil
+      // SystemProgram Transfer discriminator: [2, 0, 0, 0] as u32-LE
+      let isTransfer = ix.programData.count >= 12 && ix.programData.prefix(4) == Data([2, 0, 0, 0])
+      var lamports: UInt64?
+      if isTransfer {
+        var v: UInt64 = 0
+        for (i, b) in ix.programData.dropFirst(4).prefix(8).enumerated() { v |= UInt64(b) << (i * 8) }
+        lamports = v
+      }
+      return SolanaSummaryInfo(to: to, lamports: lamports, isTransfer: isTransfer,
+                               splDest: nil, splAmount: nil, isSplTransfer: false)
     }
-    return (to, lamports, isTransfer)
+
+    if let ix = splIx {
+      let data = ix.programData
+      // SPL instruction byte 0: 3 = Transfer, 12 = TransferChecked
+      // Transfer: accounts[0]=src, accounts[1]=dest, accounts[2]=owner; data[1..8]=amount LE u64
+      // TransferChecked: accounts[0]=src, accounts[1]=mint, accounts[2]=dest, accounts[3]=owner
+      if !data.isEmpty && data[0] == 3 && data.count >= 9 {
+        let dest = ix.accounts.count >= 2 ? safeGet(accounts, Int(ix.accounts[1])) : nil
+        var amount: UInt64 = 0
+        for (i, b) in data.dropFirst(1).prefix(8).enumerated() { amount |= UInt64(b) << (i * 8) }
+        return SolanaSummaryInfo(to: nil, lamports: nil, isTransfer: false,
+                                 splDest: dest, splAmount: amount, isSplTransfer: true)
+      } else if !data.isEmpty && data[0] == 12 && data.count >= 10 {
+        let dest = ix.accounts.count >= 3 ? safeGet(accounts, Int(ix.accounts[2])) : nil
+        var amount: UInt64 = 0
+        for (i, b) in data.dropFirst(1).prefix(8).enumerated() { amount |= UInt64(b) << (i * 8) }
+        return SolanaSummaryInfo(to: nil, lamports: nil, isTransfer: false,
+                                 splDest: dest, splAmount: amount, isSplTransfer: true)
+      }
+      return SolanaSummaryInfo(to: nil, lamports: nil, isTransfer: false,
+                               splDest: nil, splAmount: nil, isSplTransfer: false)
+    }
+
+    return nil
   }
 
   private static func txHexToDouble(_ hex: String) -> Double {

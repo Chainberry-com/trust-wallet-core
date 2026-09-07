@@ -1,0 +1,76 @@
+{
+  "_note": "Signing vectors for Trust Wallet Core 4.1.19. Populate by running the signing conformance tests on a real device with 4.1.19 installed, then promote each to status: verified and fill in expectedSignedTx.",
+  "_mnemonic_ref": "Use the same test mnemonic as address-derivation-vectors.json — never use with real funds.",
+  "_android_test": "android/src/androidTest/.../AddressDerivationConformanceTest.kt — extend with signing assertions once vectors are harvested",
+  "_ios_test": "ios/ConformanceTests/SigningConformanceTests.swift",
+  "version": "4.1.19",
+  "vectors": [
+    {
+      "chain": "ethereum",
+      "status": "pending-verification",
+      "unsignedTx": {
+        "to": "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F",
+        "chainId": 1,
+        "nonce": 0,
+        "gasLimitHex": "5208",
+        "gasPriceHex": "3B9ACA00",
+        "valueHex": "DE0B6B3A7640000"
+      },
+      "expectedSignedTx": ""
+    },
+    {
+      "chain": "solana",
+      "status": "pending-verification",
+      "unsignedTx": {
+        "unsignedTxBase64": ""
+      },
+      "expectedSignedTx": ""
+    },
+    {
+      "chain": "bitcoin",
+      "status": "pending-verification",
+      "unsignedTx": {
+        "toAddress": "",
+        "changeAddress": "",
+        "sendAmountSats": "100000",
+        "changeAmountSats": "0",
+        "satsPerByte": 10,
+        "inputs": []
+      },
+      "expectedSignedTx": ""
+    },
+    {
+      "chain": "tron",
+      "status": "pending-verification",
+      "unsignedTx": {
+        "txID": "",
+        "raw_data_hex": "",
+        "raw_data": {}
+      },
+      "expectedSignedTx": ""
+    },
+    {
+      "chain": "ton",
+      "status": "pending-verification",
+      "unsignedTx": {
+        "toAddress": "",
+        "amount": "1000000000",
+        "seqno": 1
+      },
+      "expectedSignedTx": ""
+    },
+    {
+      "chain": "xrp",
+      "status": "pending-verification",
+      "unsignedTx": {
+        "Account": "",
+        "Destination": "",
+        "Amount": "1000000",
+        "Fee": "12",
+        "Sequence": 1,
+        "LastLedgerSequence": 100
+      },
+      "expectedSignedTx": ""
+    }
+  ]
+}
