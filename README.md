@@ -12,26 +12,11 @@ npx expo install @chainberry/trust-wallet-core
 
 This is an Expo config plugin module with native Android/iOS code, so it requires a development build (`expo prebuild` / EAS Build) — it will not work in Expo Go.
 
-### Android: GitHub Packages authentication required
+### Android: no GitHub credentials needed
 
-Trust Wallet Core's Android artifact is published to GitHub Packages, which requires authentication even though the package itself is public. Without credentials, `./gradlew` will fail to resolve `com.trustwallet:wallet-core`.
+Trust Wallet Core's Android artifact is only published to GitHub Packages, which requires authentication even though the package itself is public. To avoid making that a requirement for every dev/CI machine, `com.trustwallet:wallet-core` and its `wallet-core-proto` dependency are vendored locally as a plain Maven repo in `android/libs/` — `android/build.gradle` resolves from there first, so a normal `./gradlew` build needs no credentials at all. See `android/libs/README.md` for how it's kept up to date.
 
-Set up **one** of:
-
-```sh
-# Env vars (CI / one-off terminal)
-export GITHUB_ACTOR=your-github-username
-export GITHUB_TOKEN=ghp_xxxxxxxxxxxx   # classic PAT, read:packages scope only
-```
-
-or add to `~/.gradle/gradle.properties` (permanent local dev setup):
-
-```properties
-gpr.user=your-github-username
-gpr.key=ghp_xxxxxxxxxxxx
-```
-
-Generate a token at github.com/settings/tokens → "classic" → check `read:packages`.
+GitHub Packages auth is still needed (via `GITHUB_ACTOR`/`GITHUB_TOKEN` env vars or `gpr.user`/`gpr.key` in `~/.gradle/gradle.properties`) only when bumping the pinned wallet-core version — see `android/libs/download.sh`.
 
 ### iOS
 
