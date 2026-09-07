@@ -317,16 +317,37 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
       val dataHex = (unsignedTx["dataHex"] as? String) ?: ""
       val stripped = dataHex.removePrefix("0x")
       if (stripped.isNotEmpty() && stripped != "0") {
-        lines += "Contract data: ${stripped.length / 2} bytes — review carefully"
+        val sel = stripped.take(8).lowercase()
+        if (sel == "a9059cbb" && stripped.length >= 136) {
+          // transfer(address recipient, uint256 amount)
+          val recipient = "0x" + stripped.drop(32).take(40)
+          val amountHex = stripped.drop(72).take(64).trimStart('0').ifEmpty { "0" }
+          lines += "Token transfer to: ${fmtAddr(recipient)}"
+          lines += "Token amount (raw units): 0x$amountHex"
+        } else if (sel == "23b872dd" && stripped.length >= 200) {
+          // transferFrom(address from, address to, uint256 amount)
+          val to = "0x" + stripped.drop(96).take(40)
+          val amountHex = stripped.drop(136).take(64).trimStart('0').ifEmpty { "0" }
+          lines += "Token transfer to: ${fmtAddr(to)}"
+          lines += "Token amount (raw units): 0x$amountHex"
+        } else {
+          lines += "Contract data: ${stripped.length / 2} bytes — review carefully"
+        }
       }
     }
     ChainKey.BITCOIN, ChainKey.LITECOIN -> {
       (unsignedTx["toAddress"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
-      (unsignedTx["sendAmountSats"] as? String)?.toLongOrNull()?.let {
-        lines += "Amount: ${fmtAmt(it.toDouble() / 1e8)} ${chain.symbol}"
-      }
+      val sendSats = (unsignedTx["sendAmountSats"] as? String)?.toLongOrNull() ?: 0L
+      if (sendSats > 0) lines += "Amount: ${fmtAmt(sendSats.toDouble() / 1e8)} ${chain.symbol}"
       (unsignedTx["changeAddress"] as? String)?.let { lines += "Change to: ${fmtAddr(it)}" }
       (unsignedTx["satsPerByte"] as? Number)?.let { lines += "Fee rate: ${it.toInt()} sat/vB" }
+      @Suppress("UNCHECKED_CAST")
+      val inputTotal = (unsignedTx["inputs"] as? List<Map<String, Any>>)
+        ?.mapNotNull { (it["amountSats"] as? String)?.toLongOrNull() }
+        ?.fold(0L, Long::plus) ?: 0L
+      val changeSats = (unsignedTx["changeAmountSats"] as? String)?.toLongOrNull() ?: 0L
+      val totalFee = inputTotal - sendSats - changeSats
+      if (totalFee > 0) lines += "Total fee: ${fmtAmt(totalFee.toDouble() / 1e8)} ${chain.symbol}"
     }
     ChainKey.XRP -> {
       (unsignedTx["Destination"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
@@ -361,7 +382,18 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
           lines += "Contract type: $it — review carefully"
         }
       }
-      (unsignedTx["txID"] as? String)?.let { lines += "TxID: ${it.take(16)}…" }
+      (unsignedTx["txID"] as? String)?.let { txId ->
+        val rawHex = unsignedTx["raw_data_hex"] as? String
+        if (rawHex != null) {
+          val computed = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(rawHex.hexToBytes()).toHex()
+          if (computed.lowercase() != txId.lowercase())
+            throw ChainSigningException("TRX txID does not match SHA256(raw_data_hex) — signing refused")
+          lines += "TxID verified ✓"
+        } else {
+          lines += "TxID: ${txId.take(16)}… (raw_data_hex absent — unverified)"
+        }
+      }
     }
     ChainKey.SOLANA -> {
       val info = (unsignedTx["unsignedTxBase64"] as? String)?.let { decodeSolanaForSummary(it) }
@@ -383,11 +415,15 @@ private fun decodeSolanaForSummary(b64: String): SolanaSummary? = try {
   val txBytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
   val decoded = Solana.DecodingTransactionOutput.parseFrom(TransactionDecoder.decode(CoinType.SOLANA, txBytes))
   if (decoded.error != Common.SigningError.OK) return null
-  val accounts = decoded.transaction.legacy.message.accountKeysList
-  val ix = decoded.transaction.legacy.message.instructionsList.firstOrNull()
-    ?: return SolanaSummary(null, null, false)
+  val accounts = decoded.transaction.legacy.accountKeysList
+  val systemProgram = "11111111111111111111111111111111"
+  // Find the first SystemProgram instruction by program address, skipping ComputeBudget
+  // and any other leading instructions that could be misclassified as a SOL transfer.
+  val ix = decoded.transaction.legacy.instructionsList
+    .firstOrNull { accounts.getOrNull(it.programId) == systemProgram }
+    ?: return null
   val to = if (ix.accountsCount >= 2) accounts.getOrNull(ix.accountsList[1]) else null
-  val dataBytes = ix.data.toByteArray()
+  val dataBytes = ix.programData.toByteArray()
   val isTransfer = dataBytes.size >= 12 &&
     dataBytes[0] == 2.toByte() && dataBytes[1] == 0.toByte() &&
     dataBytes[2] == 0.toByte() && dataBytes[3] == 0.toByte()

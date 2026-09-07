@@ -378,16 +378,36 @@ enum ChainSigner {
       let dataHex = (unsignedTx["dataHex"] as? String) ?? ""
       let stripped = dataHex.hasPrefix("0x") ? String(dataHex.dropFirst(2)) : dataHex
       if !stripped.isEmpty && stripped != "0" {
-        lines.append("Contract data: \(stripped.count / 2) bytes — review carefully")
+        let sel = stripped.prefix(8).lowercased()
+        if sel == "a9059cbb", stripped.count >= 136 {
+          // transfer(address recipient, uint256 amount)
+          let recipient = "0x" + String(stripped.dropFirst(32).prefix(40))
+          let amountHex = String(stripped.dropFirst(72).prefix(64)).drop(while: { $0 == "0" })
+          lines.append("Token transfer to: \(fmtAddr(recipient))")
+          lines.append("Token amount (raw units): 0x\(amountHex.isEmpty ? "0" : String(amountHex))")
+        } else if sel == "23b872dd", stripped.count >= 200 {
+          // transferFrom(address from, address to, uint256 amount)
+          let to = "0x" + String(stripped.dropFirst(96).prefix(40))
+          let amountHex = String(stripped.dropFirst(136).prefix(64)).drop(while: { $0 == "0" })
+          lines.append("Token transfer to: \(fmtAddr(to))")
+          lines.append("Token amount (raw units): 0x\(amountHex.isEmpty ? "0" : String(amountHex))")
+        } else {
+          lines.append("Contract data: \(stripped.count / 2) bytes — review carefully")
+        }
       }
 
     case .bitcoin, .litecoin:
       if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
-      if let sats = (unsignedTx["sendAmountSats"] as? String).flatMap(Int64.init) {
-        lines.append("Amount: \(fmtAmt(Double(sats) / 1e8)) \(chain.symbol)")
-      }
+      let sendSats = (unsignedTx["sendAmountSats"] as? String).flatMap(Int64.init) ?? 0
+      if sendSats > 0 { lines.append("Amount: \(fmtAmt(Double(sendSats) / 1e8)) \(chain.symbol)") }
       if let change = unsignedTx["changeAddress"] as? String { lines.append("Change to: \(fmtAddr(change))") }
       if let spb = unsignedTx["satsPerByte"] as? NSNumber { lines.append("Fee rate: \(spb.intValue) sat/vB") }
+      let inputTotal = (unsignedTx["inputs"] as? [[String: Any]])?
+        .compactMap { ($0["amountSats"] as? String).flatMap(Int64.init) }
+        .reduce(Int64(0), +) ?? 0
+      let changeSats = (unsignedTx["changeAmountSats"] as? String).flatMap(Int64.init) ?? 0
+      let totalFee = inputTotal - sendSats - changeSats
+      if totalFee > 0 { lines.append("Total fee: \(fmtAmt(Double(totalFee) / 1e8)) \(chain.symbol)") }
 
     case .xrp:
       if let dest = unsignedTx["Destination"] as? String { lines.append("To: \(fmtAddr(dest))") }
@@ -420,9 +440,20 @@ enum ChainSigner {
           lines.append("Contract type: \(type_) — review carefully")
         }
       }
-      // Show the exact digest being signed so the user can cross-check with the broadcast payload.
       if let txID = unsignedTx["txID"] as? String {
-        lines.append("TxID: \(txID.prefix(16))…")
+        // Verify txID == SHA256(raw_data_hex) to detect a mismatched digest.
+        if let rawHex = unsignedTx["raw_data_hex"] as? String,
+           let rawBytes = hexData(rawHex) {
+          let computed = Hash.sha256(data: rawBytes)
+          let computedHex = computed.map { String(format: "%02x", $0) }.joined()
+          guard computedHex.lowercased() == txID.lowercased() else {
+            throw Exception(name: "TxIntegrityFailed",
+              description: "TRX txID does not match SHA256(raw_data_hex) — signing refused")
+          }
+          lines.append("TxID verified ✓")
+        } else {
+          lines.append("TxID: \(txID.prefix(16))… (raw_data_hex absent — unverified)")
+        }
       }
 
     case .solana:
@@ -451,7 +482,18 @@ enum ChainSigner {
           decoded.error == .ok else { return nil }
     let accounts = decoded.transaction.legacy.accountKeys
     let instrs = decoded.transaction.legacy.instructions
-    guard let ix = instrs.first else { return (nil, nil, false) }
+    // Find the first SystemProgram instruction by verifying the program address.
+    // Skips ComputeBudget and any other leading instructions so they can't be
+    // misclassified as a SOL transfer (ComputeBudget SetComputeUnitLimit also
+    // uses instruction type 2 as a u8 prefix, which superficially resembles the
+    // SystemProgram Transfer discriminator [2,0,0,0] as u32-LE).
+    let systemProgram = "11111111111111111111111111111111"
+    var targetIx: TW_Solana_Proto_RawMessage.Instruction? = nil
+    for instr in instrs where safeGet(accounts, Int(instr.programID)) == systemProgram {
+      targetIx = instr
+      break
+    }
+    guard let ix = targetIx else { return nil }
     let to: String? = ix.accounts.count >= 2
       ? safeGet(accounts, Int(ix.accounts[1]))
       : nil
