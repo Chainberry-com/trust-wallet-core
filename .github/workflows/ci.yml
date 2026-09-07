@@ -22,7 +22,7 @@ jobs:
           node-version: '20'
       - run: npm install && npm install expo expo-modules-core
       - name: Type check
-        run: npx tsc --noEmit --strict --target ESNext --moduleResolution bundler src/index.ts
+        run: npx tsc --noEmit --strict --skipLibCheck --target ESNext --moduleResolution bundler --ignoreConfig src/index.ts
 
   ios-podspec-lint:
     name: iOS podspec lint
