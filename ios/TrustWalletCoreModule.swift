@@ -105,7 +105,7 @@ public class TrustWalletCoreModule: Module {
   /// fee). The user must tap "Confirm & Sign" before biometric auth fires — this is the only
   /// place in the native module where informed consent is collected.
   private static func confirmTransaction(chain: ChainKey, unsignedTx: [String: Any]) async throws {
-    let message = ChainSigner.buildSummary(chain: chain, unsignedTx: unsignedTx)
+    let message = try ChainSigner.buildSummary(chain: chain, unsignedTx: unsignedTx)
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
       DispatchQueue.main.async {
         let scene = UIApplication.shared.connectedScenes

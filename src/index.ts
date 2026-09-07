@@ -35,13 +35,13 @@ const TrustWalletCore = requireNativeModule("TrustWalletCore");
  * strength 128 = 12 words, 256 = 24 words. No BIP-39 passphrase support: signing always
  * reconstructs the wallet from the mnemonic alone, so a caller-supplied passphrase here
  * would derive addresses from a seed different from the one actually used to sign. */
-export async function createWallet(strength: 128 | 256 = 128): Promise<WalletSummary> {
+export async function createWallet(strength: 128 | 256 = 128, _isTestnet?: boolean): Promise<WalletSummary> {
   return TrustWalletCore.createWallet(strength);
 }
 
 /** One-time mnemonic exposure from the caller — persisted natively immediately, never
  * retained in JS after this call returns. No BIP-39 passphrase support (see `createWallet`). */
-export async function importWallet(mnemonic: string): Promise<WalletSummary> {
+export async function importWallet(mnemonic: string, _isTestnet?: boolean): Promise<WalletSummary> {
   return TrustWalletCore.importWallet(mnemonic);
 }
 
@@ -60,6 +60,7 @@ export async function signTransaction(
   walletId: string,
   chain: Chain,
   unsignedTx: Record<string, unknown>,
+  _isTestnet?: boolean,
 ): Promise<SignResult> {
   return TrustWalletCore.signTransaction(walletId, chain, unsignedTx);
 }

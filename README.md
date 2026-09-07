@@ -10,7 +10,7 @@ Supported chains: Ethereum, BNB Smart Chain, Polygon, Solana, Tron, TON, Bitcoin
 npx expo install @chainberry/trust-wallet-core
 ```
 
-This is an Expo config plugin module with native Android/iOS code, so it requires a development build (`expo prebuild` / EAS Build) — it will not work in Expo Go.
+This is an Expo native module with native Android/iOS code. It uses Expo's autolinking mechanism and does not ship an Expo config plugin. A development build is required (`expo prebuild` / EAS Build) — it will not work in Expo Go.
 
 ### Android: GitHub Packages authentication required
 
@@ -61,7 +61,7 @@ const mnemonic = await exportMnemonic(walletId);
 - `createWallet(strength = 128)` — generates a new BIP-39 mnemonic and persists it natively (Keychain on iOS / Keystore-backed file on Android, biometry-or-passcode gated). Returns `{ walletId, addresses }` — the mnemonic itself never leaves native code. No BIP-39 passphrase support: `signTransaction` always reconstructs the wallet with an empty passphrase, so a caller-supplied one would derive addresses from a seed different from the one actually used to sign.
 - `importWallet(mnemonic)` — validates and persists an existing mnemonic the same way. The `mnemonic` argument is a one-time exposure from the caller (e.g. a text-entry backup-restore screen); discard your own copy immediately after this call resolves.
 - `listWallets()` — returns `{ walletId, addresses }[]` for every persisted wallet, reading only the ungated metadata store. No biometric prompt.
-- `deleteWallet(walletId)` — removes the wallet's native key material and metadata entry. Irreversible; not biometric-gated (deleting reveals nothing, so this is a UX confirmation concern, not a key-secrecy one).
+- `deleteWallet(walletId)` — removes the wallet's native key material and metadata entry. Irreversible; requires a fresh biometric/passcode confirmation before deletion proceeds on both platforms.
 - `signTransaction(walletId, chain, unsignedTx)` — triggers a native biometry/passcode prompt, then derives the key and signs entirely inside native code. Returns `{ signedTx, meta? }`; `meta` currently only carries TON's `txHash`.
 - `exportMnemonic(walletId)` — the one sanctioned mnemonic exposure. Biometry/passcode gated. Use only for an explicit "reveal recovery phrase" backup screen; don't hold the result in app state beyond that screen's lifetime.
 

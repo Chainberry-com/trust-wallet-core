@@ -166,7 +166,7 @@ enum ChainSigner {
     // TW's sanctioned path. We pass the same blockhash back (no-op refresh) so the
     // tx content is unchanged — only the signature is added.
     let decodedData = TransactionDecoder.decode(coinType: .solana, encodedTx: txData)
-    let decoded = try SolanaDecodingTransactionOutput(serializedData: decodedData)
+    let decoded = try SolanaDecodingTransactionOutput(serializedBytes: decodedData)
     guard decoded.error == .ok else {
       throw Exception(name: "DecodingFailed", description: "Failed to decode SOL tx: \(decoded.errorMessage)")
     }
@@ -174,12 +174,10 @@ enum ChainSigner {
 
     let privateKeys = DataVector()
     privateKeys.add(data: privateKey.data)
-    guard let outputData = SolanaTransaction.updateBlockhashAndSign(
+    let outputData = SolanaTransaction.updateBlockhashAndSign(
       encodedTx: unsignedTxBase64, recentBlockhash: recentBlockhash, privateKeys: privateKeys
-    ) else {
-      throw Exception(name: "SigningFailed", description: "SolanaTransaction.updateBlockhashAndSign returned nil")
-    }
-    let output = try SolanaSigningOutput(serializedData: outputData)
+    )
+    let output = try SolanaSigningOutput(serializedBytes: outputData)
     guard output.error == .ok else {
       throw Exception(name: "SigningFailed", description: output.errorMessage)
     }
@@ -255,26 +253,29 @@ enum ChainSigner {
   private static func signTron(wallet: HDWallet, txParams: [String: Any]) throws -> String {
     let privateKey = wallet.getKeyForCoin(coin: .tron)
 
-    // Pass the full TronGrid unsigned tx JSON via rawJson — wallet-core's direct-sign path
-    // reads txID from the JSON and signs that digest, returning the complete signed tx in output.json.
+    // Sign via txID — wallet-core reads the txID digest and signs it directly.
     // This covers both plain TRX transfers and TRC20 triggerSmartContract payloads.
-    guard JSONSerialization.isValidJSONObject(txParams) else {
-      throw Exception(name: "InvalidParams", description: "TRX tx is not JSON-serializable")
-    }
-    let jsonData = try JSONSerialization.data(withJSONObject: txParams)
-    guard let jsonStr = String(data: jsonData, encoding: .utf8) else {
-      throw Exception(name: "InvalidParams", description: "TRX tx JSON encoding failed")
+    guard let txID = txParams["txID"] as? String else {
+      throw Exception(name: "InvalidParams", description: "Missing txID in TRX tx params")
     }
 
     var input = TronSigningInput()
     input.privateKey = privateKey.data
-    input.rawJson = jsonStr
+    input.txID = txID
 
     let output: TronSigningOutput = AnySigner.sign(input: input, coin: .tron)
     guard output.error == .ok else {
       throw Exception(name: "SigningFailed", description: output.errorMessage)
     }
-    return output.json
+
+    // Reconstruct the full TronGrid broadcast payload with the signature appended.
+    var broadcastTx = txParams
+    broadcastTx["signature"] = [output.signature.hexString]
+    let broadcastData = try JSONSerialization.data(withJSONObject: broadcastTx)
+    guard let broadcastJson = String(data: broadcastData, encoding: .utf8) else {
+      throw Exception(name: "EncodingFailed", description: "TRX broadcast tx JSON encoding failed")
+    }
+    return broadcastJson
   }
 
   // MARK: - XRP
@@ -299,15 +300,15 @@ enum ChainSigner {
     payment.amount = try parseXrpAmountDrops(amountDrops)
     payment.destination = destination
     if let resolvedTag = try parseXrpDestinationTag(destinationTag) {
-      payment.destinationTag = resolvedTag
+      payment.destinationTag = Int64(resolvedTag)
     }
 
     var input = RippleSigningInput()
     input.privateKey = privateKey.data
     input.account = account
     input.fee = try parseXrpFeeDrops(feeDrops)
-    input.sequence = UInt32(sequence)
-    if let lls = lastLedgerSequence { input.lastLedgerSequence = UInt32(lls) }
+    input.sequence = Int32(sequence)
+    if let lls = lastLedgerSequence { input.lastLedgerSequence = Int32(lls) }
     input.opPayment = payment
 
     let output: RippleSigningOutput = AnySigner.sign(input: input, coin: .xrp)
@@ -335,14 +336,11 @@ enum ChainSigner {
 
     let privateKey = wallet.getKeyForCoin(coin: .ton)
 
-    // amount is Data (uint128 big-endian); encode the nanoton UInt64 as 8 big-endian bytes.
     let nanotons = try parseTonNanotons(amountStr)
-    var bigEndianNano = nanotons.bigEndian
-    let amountData = withUnsafeBytes(of: &bigEndianNano) { Data($0) }
 
     var transfer = TheOpenNetworkTransfer()
     transfer.dest = toAddress
-    transfer.amount = amountData
+    transfer.amount = nanotons
     transfer.mode = UInt32(TheOpenNetworkSendMode.payFeesSeparately.rawValue | TheOpenNetworkSendMode.ignoreActionPhaseErrors.rawValue)
     transfer.bounceable = true
     if let memoId { transfer.comment = memoId }
@@ -363,7 +361,7 @@ enum ChainSigner {
 
   // MARK: - Transaction summary for native confirmation UI
 
-  static func buildSummary(chain: ChainKey, unsignedTx: [String: Any]) -> String {
+  static func buildSummary(chain: ChainKey, unsignedTx: [String: Any]) throws -> String {
     var lines = ["Network: \(chain.rawValue.uppercased())"]
     switch chain {
     case .ethereum, .bnb, .polygon:
@@ -376,12 +374,41 @@ enum ChainSigner {
       )
       let fee = gasLimit * gasPrice
       if fee > 0 { lines.append("Max fee: \(fmtAmt(fee / 1e18)) \(chain.symbol)") }
+      if let chainId = unsignedTx["chainId"] as? NSNumber { lines.append("Chain ID: \(chainId.intValue)") }
+      if let nonce = unsignedTx["nonce"] as? NSNumber { lines.append("Nonce: \(nonce.intValue)") }
+      let dataHex = (unsignedTx["dataHex"] as? String) ?? ""
+      let stripped = dataHex.hasPrefix("0x") ? String(dataHex.dropFirst(2)) : dataHex
+      if !stripped.isEmpty && stripped != "0" {
+        let sel = stripped.prefix(8).lowercased()
+        if sel == "a9059cbb", stripped.count >= 136 {
+          // transfer(address recipient, uint256 amount)
+          let recipient = "0x" + String(stripped.dropFirst(32).prefix(40))
+          let amountHex = String(stripped.dropFirst(72).prefix(64)).drop(while: { $0 == "0" })
+          lines.append("Token transfer to: \(fmtAddr(recipient))")
+          lines.append("Token amount (raw units): 0x\(amountHex.isEmpty ? "0" : String(amountHex))")
+        } else if sel == "23b872dd", stripped.count >= 200 {
+          // transferFrom(address from, address to, uint256 amount)
+          let to = "0x" + String(stripped.dropFirst(96).prefix(40))
+          let amountHex = String(stripped.dropFirst(136).prefix(64)).drop(while: { $0 == "0" })
+          lines.append("Token transfer to: \(fmtAddr(to))")
+          lines.append("Token amount (raw units): 0x\(amountHex.isEmpty ? "0" : String(amountHex))")
+        } else {
+          lines.append("Contract data: \(stripped.count / 2) bytes — review carefully")
+        }
+      }
 
     case .bitcoin, .litecoin:
       if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
-      if let sats = (unsignedTx["sendAmountSats"] as? String).flatMap(Int64.init) {
-        lines.append("Amount: \(fmtAmt(Double(sats) / 1e8)) \(chain.symbol)")
-      }
+      let sendSats = (unsignedTx["sendAmountSats"] as? String).flatMap(Int64.init) ?? 0
+      if sendSats > 0 { lines.append("Amount: \(fmtAmt(Double(sendSats) / 1e8)) \(chain.symbol)") }
+      if let change = unsignedTx["changeAddress"] as? String { lines.append("Change to: \(fmtAddr(change))") }
+      if let spb = unsignedTx["satsPerByte"] as? NSNumber { lines.append("Fee rate: \(spb.intValue) sat/vB") }
+      let inputTotal = (unsignedTx["inputs"] as? [[String: Any]])?
+        .compactMap { ($0["amountSats"] as? String).flatMap(Int64.init) }
+        .reduce(Int64(0), +) ?? 0
+      let changeSats = (unsignedTx["changeAmountSats"] as? String).flatMap(Int64.init) ?? 0
+      let totalFee = inputTotal - sendSats - changeSats
+      if totalFee > 0 { lines.append("Total fee: \(fmtAmt(Double(totalFee) / 1e8)) \(chain.symbol)") }
 
     case .xrp:
       if let dest = unsignedTx["Destination"] as? String { lines.append("To: \(fmtAddr(dest))") }
@@ -398,23 +425,87 @@ enum ChainSigner {
       if let nano = (unsignedTx["amount"] as? String).flatMap(UInt64.init) {
         lines.append("Amount: \(fmtAmt(Double(nano) / 1e9)) TON")
       }
+      if let memo = unsignedTx["memoId"] as? String, !memo.isEmpty { lines.append("Memo: \(memo)") }
+      lines.append("Fee: set by network")
 
     case .tron:
       if let rawData = unsignedTx["raw_data"] as? [String: Any],
          let contracts = rawData["contract"] as? [[String: Any]],
-         let param = contracts.first?["parameter"] as? [String: Any],
-         let value = param["value"] as? [String: Any] {
-        if let to = value["to_address"] as? String { lines.append("To: \(fmtAddr(to))") }
-        if let amount = value["amount"] as? Int { lines.append("Amount: \(fmtAmt(Double(amount) / 1e6)) TRX") }
+         let first = contracts.first {
+        if let param = first["parameter"] as? [String: Any],
+           let value = param["value"] as? [String: Any] {
+          if let to = value["to_address"] as? String { lines.append("To: \(fmtAddr(to))") }
+          if let amount = value["amount"] as? Int { lines.append("Amount: \(fmtAmt(Double(amount) / 1e6)) TRX") }
+        }
+        if let type_ = first["type"] as? String, type_ != "TransferContract" {
+          lines.append("Contract type: \(type_) — review carefully")
+        }
+      }
+      if let txID = unsignedTx["txID"] as? String {
+        // Verify txID == SHA256(raw_data_hex) to detect a mismatched digest.
+        if let rawHex = unsignedTx["raw_data_hex"] as? String,
+           let rawBytes = hexData(rawHex) {
+          let computed = Hash.sha256(data: rawBytes)
+          let computedHex = computed.map { String(format: "%02x", $0) }.joined()
+          guard computedHex.lowercased() == txID.lowercased() else {
+            throw Exception(name: "TxIntegrityFailed",
+              description: "TRX txID does not match SHA256(raw_data_hex) — signing refused")
+          }
+          lines.append("TxID verified ✓")
+        } else {
+          lines.append("TxID: \(txID.prefix(16))… (raw_data_hex absent — unverified)")
+        }
       }
 
     case .solana:
-      lines.append("(Solana — details verified by the network)")
+      // Decode the pre-built tx to extract recipient and lamports from the first instruction.
+      // Falls back to an explicit warning instead of the misleading "verified by network" message.
+      guard let info = decodeSolanaForSummary(unsignedTx) else {
+        throw Exception(name: "UndecodableTx",
+          description: "Cannot decode Solana transaction — signing refused to prevent blind signing")
+      }
+      if let to = info.to { lines.append("To: \(fmtAddr(to))") }
+      if let lamports = info.lamports { lines.append("Amount: \(fmtAmt(Double(lamports) / 1e9)) SOL") }
+      if !info.isTransfer { lines.append("Non-transfer instruction — review carefully") }
 
     case .bitcoincash:
       break
     }
     return lines.joined(separator: "\n")
+  }
+
+  private static func decodeSolanaForSummary(_ txParams: [String: Any])
+    -> (to: String?, lamports: UInt64?, isTransfer: Bool)? {
+    guard let b64 = txParams["unsignedTxBase64"] as? String,
+          let txData = Data(base64Encoded: b64) else { return nil }
+    let rawBytes = TransactionDecoder.decode(coinType: .solana, encodedTx: txData)
+    guard let decoded = try? SolanaDecodingTransactionOutput(serializedBytes: rawBytes),
+          decoded.error == .ok else { return nil }
+    let accounts = decoded.transaction.legacy.accountKeys
+    let instrs = decoded.transaction.legacy.instructions
+    // Find the first SystemProgram instruction by verifying the program address.
+    // Skips ComputeBudget and any other leading instructions so they can't be
+    // misclassified as a SOL transfer (ComputeBudget SetComputeUnitLimit also
+    // uses instruction type 2 as a u8 prefix, which superficially resembles the
+    // SystemProgram Transfer discriminator [2,0,0,0] as u32-LE).
+    let systemProgram = "11111111111111111111111111111111"
+    var targetIx: TW_Solana_Proto_RawMessage.Instruction? = nil
+    for instr in instrs where safeGet(accounts, Int(instr.programID)) == systemProgram {
+      targetIx = instr
+      break
+    }
+    guard let ix = targetIx else { return nil }
+    let to: String? = ix.accounts.count >= 2
+      ? safeGet(accounts, Int(ix.accounts[1]))
+      : nil
+    let isTransfer = ix.programData.count >= 12 && ix.programData.prefix(4) == Data([2, 0, 0, 0])
+    var lamports: UInt64?
+    if isTransfer {
+      var v: UInt64 = 0
+      for (i, b) in ix.programData.dropFirst(4).prefix(8).enumerated() { v |= UInt64(b) << (i * 8) }
+      lamports = v
+    }
+    return (to, lamports, isTransfer)
   }
 
   private static func txHexToDouble(_ hex: String) -> Double {
@@ -433,6 +524,10 @@ enum ChainSigner {
   private static func fmtAddr(_ addr: String) -> String { addr }
 
   // MARK: - Helpers
+
+  private static func safeGet<T>(_ array: [T], _ index: Int) -> T? {
+    array.indices.contains(index) ? array[index] : nil
+  }
 
   // Parses a hex string (with or without 0x, odd or even length) into Data. An empty string
   // deliberately maps to a single zero byte (fields like valueHex already default to "0"
