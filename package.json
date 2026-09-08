@@ -1,6 +1,6 @@
 {
   "name": "@chainberry/trust-wallet-core",
-  "version": "2.0.0",
+  "version": "2.5.0",
   "description": "Expo native module wrapping Trust Wallet Core for native-only HD wallet custody, address derivation, and transaction signing (Ethereum, BNB, Polygon, Solana, Tron, TON, Bitcoin, Bitcoin Cash, Litecoin, XRP) — mnemonic/private keys never cross the JS bridge",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -13,6 +13,7 @@
     "ios",
     "android/src",
     "android/build.gradle",
+    "android/libs",
     "expo-module.config.json",
     "ChainberryTrustWalletCoreModule.podspec",
     "README.md"

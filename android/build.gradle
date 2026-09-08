@@ -34,9 +34,14 @@ android {
   }
 }
 
-// ─── wallet-core credentials ──────────────────────────────────────────────────
-// GitHub Packages requires auth even for public packages.
-// Priority order (first non-empty wins):
+// ─── wallet-core artifact ──────────────────────────────────────────────────
+// com.trustwallet:wallet-core and its wallet-core-proto dependency are vendored
+// in libs/ as a plain local Maven repo, so a normal build needs NO GitHub
+// credentials at all — see libs/README.md for how it got there and how to
+// re-vendor when bumping the pinned version below.
+//
+// The GitHub Packages repo is kept as a fallback (e.g. resolving a version not
+// yet vendored) and needs auth even for this public package:
 //   1. Env vars     GITHUB_ACTOR / GITHUB_TOKEN       (CI / one-off terminal)
 //   2. Gradle props gpr.user / gpr.key in             (permanent dev setup)
 //        ~/.gradle/gradle.properties
@@ -53,6 +58,8 @@ def githubToken = System.getenv("GITHUB_TOKEN")
     ?: (project.hasProperty("gpr.key")   ? project.property("gpr.key")   : "")
 
 repositories {
+  maven { url = uri("$projectDir/libs") }
+
   maven {
     url = uri("https://maven.pkg.github.com/trustwallet/wallet-core")
     credentials {
