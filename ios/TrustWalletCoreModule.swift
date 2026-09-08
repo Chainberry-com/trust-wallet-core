@@ -10,31 +10,44 @@ public class TrustWalletCoreModule: Module {
   public func definition() -> ModuleDefinition {
     Name("TrustWalletCore")
 
+    // Runs once, right after module init, before any of the AsyncFunctions below can be reached
+    // from JS — so nothing can legitimately be mid-operation yet, which is exactly what makes a
+    // one-shot pass here sufficient (no lock/grace-period needed against an in-flight call). This
+    // is the actual crash-safety mechanism for an interrupted create/delete; see CONTEXT.md and
+    // docs/adr/0001. `reconcileOrphans` is non-throwing — never allowed to block or crash startup.
+    OnCreate {
+      NativeWalletStore.reconcileOrphans()
+    }
+
     // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses }.
     // No BIP-39 passphrase support: signTransaction always reconstructs the wallet with an
     // empty passphrase, so accepting one here would derive addresses from a seed different
     // from the one actually used to sign — always pass "" to stay consistent with that.
-    AsyncFunction("createWallet") { (strength: Int) throws -> [String: Any] in
-      guard let wallet = HDWallet(strength: Int32(strength), passphrase: "") else {
-        throw Exception(name: "WalletError", description: "Failed to generate wallet")
-      }
-      do {
-        return try Self.persistNewWallet(wallet: wallet)
-      } catch let e as NativeWalletStoreError {
-        throw e.asException
+    AsyncFunction("createWallet") { (strength: Int) async throws -> [String: Any] in
+      try await Self.withLifecycleLock(rejectIfBusy: true) {
+        guard let wallet = HDWallet(strength: Int32(strength), passphrase: "") else {
+          throw Exception(name: "WalletError", description: "Failed to generate wallet")
+        }
+        do {
+          return try Self.persistNewWallet(wallet: wallet)
+        } catch let e as NativeWalletStoreError {
+          throw e.asException
+        }
       }
     }
 
     // One-time mnemonic exposure from JS, at import only — never retained after this call.
     // Returns { walletId, addresses }. No BIP-39 passphrase support (see `createWallet`).
-    AsyncFunction("importWallet") { (mnemonic: String) throws -> [String: Any] in
-      guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: "") else {
-        throw Exception(name: "InvalidMnemonic", description: "Invalid mnemonic phrase")
-      }
-      do {
-        return try Self.persistNewWallet(wallet: wallet)
-      } catch let e as NativeWalletStoreError {
-        throw e.asException
+    AsyncFunction("importWallet") { (mnemonic: String) async throws -> [String: Any] in
+      try await Self.withLifecycleLock(rejectIfBusy: true) {
+        guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: "") else {
+          throw Exception(name: "InvalidMnemonic", description: "Invalid mnemonic phrase")
+        }
+        do {
+          return try Self.persistNewWallet(wallet: wallet)
+        } catch let e as NativeWalletStoreError {
+          throw e.asException
+        }
       }
     }
 
@@ -53,16 +66,24 @@ public class TrustWalletCoreModule: Module {
     // deleted, same gate as `signTransaction`/`exportMnemonic`. A compromised/malicious JS
     // caller can still invoke this directly (there's no UI call site today), so the gate
     // must live here rather than in JS.
+    //
+    // Removes the metadata entry *before* the secret (Keychain item) — the reverse of the old
+    // ordering. If this is interrupted between the two steps, the wallet is already gone from
+    // `listWallets` and only an orphaned Keychain item is left behind, which the next app
+    // launch's reconciliation pass cleans up (see docs/adr/0001) — never a metadata record still
+    // pointing at a secret that's already gone.
     AsyncFunction("deleteWallet") { (walletId: String) async throws -> Void in
-      do {
-        let id = try NativeWalletStore.validateWalletId(walletId)
-        _ = try await Self.authenticatedContext(reason: "Delete wallet")
-        try NativeWalletStore.deleteMnemonic(walletId: id)
-        var metadata = try NativeWalletStore.loadMetadata()
-        metadata.removeValue(forKey: id)
-        try NativeWalletStore.saveMetadata(metadata)
-      } catch let e as NativeWalletStoreError {
-        throw e.asException
+      try await Self.withLifecycleLock(rejectIfBusy: false) {
+        do {
+          let id = try NativeWalletStore.validateWalletId(walletId)
+          _ = try await Self.authenticatedContext(reason: "Delete wallet")
+          var metadata = try NativeWalletStore.loadMetadata()
+          metadata.removeValue(forKey: id)
+          try NativeWalletStore.saveMetadata(metadata)
+          try NativeWalletStore.deleteMnemonic(walletId: id)
+        } catch let e as NativeWalletStoreError {
+          throw e.asException
+        }
       }
     }
 
@@ -96,6 +117,77 @@ public class TrustWalletCoreModule: Module {
       } catch let e as NativeWalletStoreError {
         throw e.asException
       }
+    }
+  }
+
+  // MARK: - Lifecycle serialization (see docs/adr/0002)
+
+  /// Serializes create/import/delete against each other — a `Task`-based actor rather than
+  /// `NSLock`, since these calls `await` across the biometric prompt and holding an `NSLock`
+  /// across a suspension point (where Swift Concurrency may resume on a different underlying
+  /// thread) is unsafe.
+  private actor LifecycleLock {
+    private var locked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Non-blocking: returns `false` immediately if already held (used by create/import, which
+    /// reject rather than queue).
+    func tryAcquire() -> Bool {
+      guard !locked else { return false }
+      locked = true
+      return true
+    }
+
+    /// Blocking: waits until the lock is free, then acquires it (used by delete, which queues).
+    func acquire() async {
+      guard locked else {
+        locked = true
+        return
+      }
+      await withCheckedContinuation { waiters.append($0) }
+    }
+
+    /// Hands ownership directly to the next waiter rather than freeing the lock and letting
+    /// every waiter race a fresh `tryAcquire`/`acquire`.
+    func release() {
+      if !waiters.isEmpty {
+        waiters.removeFirst().resume()
+      } else {
+        locked = false
+      }
+    }
+  }
+
+  private static let lifecycleLock = LifecycleLock()
+
+  /// Serializes `body` — including the biometric/passcode prompt, not just the store writes —
+  /// against every other lifecycle-mutating call, so at most one is ever touching the shared
+  /// metadata store at a time (see docs/adr/0002). Also forecloses a second, separate bug: two
+  /// concurrent `LAContext` evaluations racing each other.
+  ///
+  /// `rejectIfBusy` chooses the policy for a caller that finds the lock already held:
+  /// `createWallet`/`importWallet` reject immediately (`ERR_WALLET_OPERATION_IN_PROGRESS`) so a
+  /// double-tap can never mint two wallets; `deleteWallet` queues instead, since two distinct
+  /// deletes are both legitimate and should both eventually happen.
+  private static func withLifecycleLock<T>(rejectIfBusy: Bool, _ body: () async throws -> T) async throws -> T {
+    if rejectIfBusy {
+      guard await lifecycleLock.tryAcquire() else {
+        throw Exception(
+          name: "OperationInProgress",
+          description: "Another wallet operation is already in progress",
+          code: "ERR_WALLET_OPERATION_IN_PROGRESS"
+        )
+      }
+    } else {
+      await lifecycleLock.acquire()
+    }
+    do {
+      let result = try await body()
+      await lifecycleLock.release()
+      return result
+    } catch {
+      await lifecycleLock.release()
+      throw error
     }
   }
 

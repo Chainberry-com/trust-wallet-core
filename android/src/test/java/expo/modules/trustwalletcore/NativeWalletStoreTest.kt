@@ -271,4 +271,74 @@ class NativeWalletStoreTest {
   fun describeLegacySecurityLevel_notInsideSecureHardwareIsSoftware() {
     assertEquals("SOFTWARE", NativeWalletStore.describeLegacySecurityLevel(false))
   }
+
+  // ─── parseKeyAlias ───────────────────────────────────────────────────────────
+
+  @Test
+  fun parseKeyAlias_isTheInverseOfKeyAlias() {
+    val id = UUID.randomUUID().toString()
+    for (mode in AuthMode.entries) {
+      val alias = NativeWalletStore.keyAlias(mode, id)
+      assertEquals(mode to id, NativeWalletStore.parseKeyAlias(alias))
+    }
+  }
+
+  @Test
+  fun parseKeyAlias_legacyInfixDoesNotSwallowBioOrCredAliases() {
+    // Regression check: LEGACY_COMBINED's infix is "", which is a prefix of every alias under
+    // KEY_ALIAS_PREFIX — parseKeyAlias must still resolve a bio_/cred_ alias to its actual mode,
+    // not fall through to LEGACY_COMBINED just because the empty-infix check would also match.
+    val id = UUID.randomUUID().toString()
+    assertEquals(
+      AuthMode.BIOMETRIC_STRONG to id,
+      NativeWalletStore.parseKeyAlias(NativeWalletStore.keyAlias(AuthMode.BIOMETRIC_STRONG, id)),
+    )
+    assertEquals(
+      AuthMode.DEVICE_CREDENTIAL to id,
+      NativeWalletStore.parseKeyAlias(NativeWalletStore.keyAlias(AuthMode.DEVICE_CREDENTIAL, id)),
+    )
+  }
+
+  @Test
+  fun parseKeyAlias_unrelatedAliasReturnsNull() {
+    assertEquals(null, NativeWalletStore.parseKeyAlias("some_other_features_key"))
+  }
+
+  // ─── findOrphanFiles / findStaleMetadataTempFiles (reconciliation, docs/adr/0001) ────────────
+
+  @Test
+  fun findOrphanFiles_fileWithNoMetadataEntryIsOrphaned() {
+    File(tmp.root, "orphan-id.enc").writeBytes(byteArrayOf(1))
+    val orphans = NativeWalletStore.findOrphanFiles(tmp.root, liveIds = emptySet())
+    assertEquals(listOf("orphan-id.enc"), orphans.map { it.name })
+  }
+
+  @Test
+  fun findOrphanFiles_fileWithMatchingMetadataEntryIsNotOrphaned() {
+    File(tmp.root, "live-id.enc").writeBytes(byteArrayOf(1))
+    val orphans = NativeWalletStore.findOrphanFiles(tmp.root, liveIds = setOf("live-id"))
+    assertTrue(orphans.isEmpty())
+  }
+
+  @Test
+  fun findOrphanFiles_ignoresNonEncFiles() {
+    // metadata.json itself (and any stray temp file) must never be swept up as a wallet orphan.
+    File(tmp.root, "metadata.json").writeText("{}")
+    val orphans = NativeWalletStore.findOrphanFiles(tmp.root, liveIds = emptySet())
+    assertTrue(orphans.isEmpty())
+  }
+
+  @Test
+  fun findStaleMetadataTempFiles_findsLeftoverTempFile() {
+    // Simulates a saveMetadataToFile interrupted after the temp write but before the rename.
+    File(tmp.root, "metadata.json.tmp-12345").writeText("{}")
+    val stale = NativeWalletStore.findStaleMetadataTempFiles(tmp.root)
+    assertEquals(listOf("metadata.json.tmp-12345"), stale.map { it.name })
+  }
+
+  @Test
+  fun findStaleMetadataTempFiles_ignoresCommittedMetadataFile() {
+    File(tmp.root, "metadata.json").writeText("{}")
+    assertTrue(NativeWalletStore.findStaleMetadataTempFiles(tmp.root).isEmpty())
+  }
 }
