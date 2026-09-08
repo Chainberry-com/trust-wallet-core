@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main, audit]
+  pull_request:
+    branches: [main, audit]
+
+# This module is an Expo native library — no standalone Gradle wrapper or Xcode project.
+# Full Android/iOS builds run via the parent project (mobile-vault). CI gates what it can:
+#   - TypeScript: type-check the JS API surface (no native deps needed)
+#   - iOS:        pod spec lint --quick (structural podspec check, no TrustWalletCore download)
+
+jobs:
+  typescript:
+    name: TypeScript type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install && npm install typescript expo expo-modules-core
+      - name: Type check
+        run: ./node_modules/.bin/tsc --noEmit --strict --skipLibCheck --target ESNext --moduleResolution bundler --ignoreConfig src/index.ts
+
+  ios-podspec-lint:
+    name: iOS podspec lint
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint podspec (structural, no compilation)
+        run: |
+          LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
+          pod spec lint TrustWalletCoreModule.podspec \
+            --allow-warnings \
+            --skip-import-validation \
+            --quick
