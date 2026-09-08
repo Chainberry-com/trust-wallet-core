@@ -440,66 +440,68 @@ private data class SolanaSummary(
   val isSplTransfer: Boolean
 )
 
-private fun decodeSolanaForSummary(b64: String): SolanaSummary? = try {
-  val txBytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
-  val decoded = Solana.DecodingTransactionOutput.parseFrom(TransactionDecoder.decode(CoinType.SOLANA, txBytes))
-  if (decoded.error != Common.SigningError.OK) return null
-  val accounts = decoded.transaction.legacy.accountKeysList
-  val systemProgram = "11111111111111111111111111111111"
-  val splPrograms = setOf(
-    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-  )
+private fun decodeSolanaForSummary(b64: String): SolanaSummary? {
+  return try {
+    val txBytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+    val decoded = Solana.DecodingTransactionOutput.parseFrom(TransactionDecoder.decode(CoinType.SOLANA, txBytes))
+    if (decoded.error != Common.SigningError.OK) return null
+    val accounts = decoded.transaction.legacy.accountKeysList
+    val systemProgram = "11111111111111111111111111111111"
+    val splPrograms = setOf(
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+    )
 
-  var systemIx: Solana.RawMessage.Instruction? = null
-  var splIx: Solana.RawMessage.Instruction? = null
-  for (instr in decoded.transaction.legacy.instructionsList) {
-    val prog = accounts.getOrNull(instr.programId)
-    if (systemIx == null && prog == systemProgram) systemIx = instr
-    if (splIx == null && prog != null && prog in splPrograms) splIx = instr
-  }
-
-  if (systemIx != null) {
-    val ix = systemIx
-    val to = if (ix.accountsCount >= 2) accounts.getOrNull(ix.accountsList[1]) else null
-    val dataBytes = ix.programData.toByteArray()
-    // SystemProgram Transfer discriminator: [2, 0, 0, 0] as u32-LE
-    val isTransfer = dataBytes.size >= 12 &&
-      dataBytes[0] == 2.toByte() && dataBytes[1] == 0.toByte() &&
-      dataBytes[2] == 0.toByte() && dataBytes[3] == 0.toByte()
-    val lamports = if (isTransfer) {
-      var v = 0UL
-      for (i in 0..7) v = v or (dataBytes[4 + i].toUByte().toULong() shl (i * 8))
-      v
-    } else null
-    return SolanaSummary(to, lamports, isTransfer, null, null, false)
-  }
-
-  if (splIx != null) {
-    val ix = splIx
-    val dataBytes = ix.programData.toByteArray()
-    // SPL instruction byte 0: 3 = Transfer, 12 = TransferChecked
-    // Transfer: accounts[0]=src, [1]=dest, [2]=owner; data[1..8]=amount LE u64
-    // TransferChecked: accounts[0]=src, [1]=mint, [2]=dest, [3]=owner
-    return when {
-      dataBytes.isNotEmpty() && dataBytes[0] == 3.toByte() && dataBytes.size >= 9 -> {
-        val dest = if (ix.accountsCount >= 2) accounts.getOrNull(ix.accountsList[1]) else null
-        var amount = 0UL
-        for (i in 0..7) amount = amount or (dataBytes[1 + i].toUByte().toULong() shl (i * 8))
-        SolanaSummary(null, null, false, dest, amount, true)
-      }
-      dataBytes.isNotEmpty() && dataBytes[0] == 12.toByte() && dataBytes.size >= 10 -> {
-        val dest = if (ix.accountsCount >= 3) accounts.getOrNull(ix.accountsList[2]) else null
-        var amount = 0UL
-        for (i in 0..7) amount = amount or (dataBytes[1 + i].toUByte().toULong() shl (i * 8))
-        SolanaSummary(null, null, false, dest, amount, true)
-      }
-      else -> SolanaSummary(null, null, false, null, null, false)
+    var systemIx: Solana.RawMessage.Instruction? = null
+    var splIx: Solana.RawMessage.Instruction? = null
+    for (instr in decoded.transaction.legacy.instructionsList) {
+      val prog = accounts.getOrNull(instr.programId)
+      if (systemIx == null && prog == systemProgram) systemIx = instr
+      if (splIx == null && prog != null && prog in splPrograms) splIx = instr
     }
-  }
 
-  null
-} catch (_: Exception) { null }
+    if (systemIx != null) {
+      val ix = systemIx
+      val to = if (ix.accountsCount >= 2) accounts.getOrNull(ix.accountsList[1]) else null
+      val dataBytes = ix.programData.toByteArray()
+      // SystemProgram Transfer discriminator: [2, 0, 0, 0] as u32-LE
+      val isTransfer = dataBytes.size >= 12 &&
+        dataBytes[0] == 2.toByte() && dataBytes[1] == 0.toByte() &&
+        dataBytes[2] == 0.toByte() && dataBytes[3] == 0.toByte()
+      val lamports = if (isTransfer) {
+        var v = 0UL
+        for (i in 0..7) v = v or (dataBytes[4 + i].toUByte().toULong() shl (i * 8))
+        v
+      } else null
+      return SolanaSummary(to, lamports, isTransfer, null, null, false)
+    }
+
+    if (splIx != null) {
+      val ix = splIx
+      val dataBytes = ix.programData.toByteArray()
+      // SPL instruction byte 0: 3 = Transfer, 12 = TransferChecked
+      // Transfer: accounts[0]=src, [1]=dest, [2]=owner; data[1..8]=amount LE u64
+      // TransferChecked: accounts[0]=src, [1]=mint, [2]=dest, [3]=owner
+      return when {
+        dataBytes.isNotEmpty() && dataBytes[0] == 3.toByte() && dataBytes.size >= 9 -> {
+          val dest = if (ix.accountsCount >= 2) accounts.getOrNull(ix.accountsList[1]) else null
+          var amount = 0UL
+          for (i in 0..7) amount = amount or (dataBytes[1 + i].toUByte().toULong() shl (i * 8))
+          SolanaSummary(null, null, false, dest, amount, true)
+        }
+        dataBytes.isNotEmpty() && dataBytes[0] == 12.toByte() && dataBytes.size >= 10 -> {
+          val dest = if (ix.accountsCount >= 3) accounts.getOrNull(ix.accountsList[2]) else null
+          var amount = 0UL
+          for (i in 0..7) amount = amount or (dataBytes[1 + i].toUByte().toULong() shl (i * 8))
+          SolanaSummary(null, null, false, dest, amount, true)
+        }
+        else -> SolanaSummary(null, null, false, null, null, false)
+      }
+    }
+
+    null
+  } catch (_: Exception) { null }
+}
 
 private fun txHexToDouble(hex: String): Double = try {
   BigInteger(hex.removePrefix("0x").ifEmpty { "0" }, 16).toDouble()
