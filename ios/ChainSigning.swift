@@ -6,10 +6,14 @@ import WalletCore
 
 enum ChainKey: String, CaseIterable {
   case ethereum, bnb, polygon
+  case avax, base, arbitrum, optimism, sonic
   case solana
   case tron, ton
-  case bitcoin, bitcoincash, litecoin
+  case bitcoin, bitcoincash, dogecoin, litecoin
   case xrp
+  case cosmos
+  case aptos
+  case tezos
 
   init(fromJs raw: String) throws {
     guard let key = ChainKey(rawValue: raw) else {
@@ -23,28 +27,41 @@ enum ChainKey: String, CaseIterable {
     case .ethereum: return "ETH"
     case .bnb:      return "BNB"
     case .polygon:  return "POL"
+    case .avax:     return "AVAX"
+    case .base:     return "ETH"
+    case .arbitrum: return "ETH"
+    case .optimism: return "ETH"
+    case .sonic:    return "S"
     case .solana:   return "SOL"
     case .tron:     return "TRX"
     case .ton:      return "TON"
     case .bitcoin:  return "BTC"
     case .bitcoincash: return "BCH"
+    case .dogecoin: return "DOGE"
     case .litecoin: return "LTC"
     case .xrp:      return "XRP"
+    case .cosmos:   return "ATOM"
+    case .aptos:    return "APT"
+    case .tezos:    return "XTZ"
     }
   }
 
-  // Polygon shares Ethereum's secp256k1 key/address (same BIP44 path) — no distinct CoinType.
+  // All EVM chains share Ethereum's secp256k1 key/address (BIP44 slip44 = 60) — no distinct CoinType.
   var coinType: CoinType {
     switch self {
-    case .ethereum, .polygon: return .ethereum
+    case .ethereum, .polygon, .avax, .base, .arbitrum, .optimism, .sonic: return .ethereum
     case .bnb: return .smartChain
     case .solana: return .solana
     case .tron: return .tron
     case .ton: return .ton
     case .bitcoin: return .bitcoin
     case .bitcoincash: return .bitcoinCash
+    case .dogecoin: return .dogecoin
     case .litecoin: return .litecoin
     case .xrp: return .xrp
+    case .cosmos: return .cosmos
+    case .aptos: return .aptos
+    case .tezos: return .tezos
     }
   }
 }
@@ -126,11 +143,11 @@ enum ChainSigner {
 
   static func sign(chain: ChainKey, wallet: HDWallet, unsignedTx: [String: Any], isTestnet: Bool) throws -> Result {
     switch chain {
-    case .ethereum, .bnb, .polygon:
+    case .ethereum, .bnb, .polygon, .avax, .base, .arbitrum, .optimism, .sonic:
       return Result(signedTx: try signEvm(wallet: wallet, coin: chain.coinType, txParams: unsignedTx), meta: nil)
     case .solana:
       return Result(signedTx: try signSolana(wallet: wallet, txParams: unsignedTx), meta: nil)
-    case .bitcoin, .litecoin:
+    case .bitcoin, .dogecoin, .litecoin:
       return Result(signedTx: try signUtxo(wallet: wallet, chain: chain, txParams: unsignedTx, isTestnet: isTestnet), meta: nil)
     case .tron:
       return Result(signedTx: try signTron(wallet: wallet, txParams: unsignedTx), meta: nil)
@@ -139,10 +156,13 @@ enum ChainSigner {
     case .ton:
       return try signTon(wallet: wallet, txParams: unsignedTx)
     case .bitcoincash:
-      // Sending is intentionally unsupported: chainberry-wallet's prepareSelfCustodyUnsignedTx
-      // has no BCH case (its own comment notes apps/selfCustodySigner's signer doesn't either) —
-      // this app only ever needs BCH address derivation, never a signed BCH transaction.
-      throw Exception(name: "UnsupportedChain", description: "BCH sending is not supported")
+      return Result(signedTx: try signBch(wallet: wallet, txParams: unsignedTx), meta: nil)
+    case .cosmos:
+      return Result(signedTx: try signCosmos(wallet: wallet, txParams: unsignedTx), meta: nil)
+    case .aptos:
+      return Result(signedTx: try signAptos(wallet: wallet, txParams: unsignedTx), meta: nil)
+    case .tezos:
+      return Result(signedTx: try signTezos(wallet: wallet, txParams: unsignedTx), meta: nil)
     }
   }
 
@@ -251,6 +271,66 @@ enum ChainSigner {
       throw Exception(name: "SigningFailed", description: output.errorMessage)
     }
     return output.encoded
+  }
+
+  // MARK: - BCH (UTXO-based, replay-protected)
+  // txParams: { unsignedDescriptorJson: string }
+  // descriptor (from wallet-broadcast's prepareBchTransaction):
+  //   { inputs: [{ txid, vout, satoshis, scriptPubKeyHex }], toAddress, sendAmountSats,
+  //     changeAddress?, changeSats? }
+  // BCH uses SIGHASH_ALL | SIGHASH_FORK_ID (0x41) for replay protection — distinct from
+  // BTC/LTC's plain SIGHASH_ALL (0x01).
+  private static func signBch(wallet: HDWallet, txParams: [String: Any]) throws -> String {
+    guard let descriptorJson = txParams["unsignedDescriptorJson"] as? String,
+          let descriptorData = descriptorJson.data(using: .utf8),
+          let descriptor = try? JSONSerialization.jsonObject(with: descriptorData) as? [String: Any],
+          let toAddress = descriptor["toAddress"] as? String,
+          let sendAmountSats = (descriptor["sendAmountSats"] as? NSNumber)?.int64Value,
+          let inputs = descriptor["inputs"] as? [[String: Any]] else {
+      throw Exception(name: "InvalidParams", description: "Invalid BCH descriptor JSON")
+    }
+
+    let privateKey = wallet.getKeyForCoin(coin: .bitcoinCash)
+
+    var input = BitcoinSigningInput()
+    input.hashType = 0x41 // SIGHASH_ALL | SIGHASH_FORK_ID (BCH replay protection)
+    input.amount = sendAmountSats
+    input.byteFee = 1 // BCH fees are minimal; 1 sat/byte is the ecosystem standard
+    input.toAddress = toAddress
+    if let changeAddress = descriptor["changeAddress"] as? String {
+      input.changeAddress = changeAddress
+    }
+    input.useMaxAmount = false
+    input.coinType = CoinType.bitcoinCash.rawValue
+    input.privateKey = [privateKey.data]
+
+    input.utxo = try inputs.map { entry in
+      guard let txid = entry["txid"] as? String,
+            let voutNum = entry["vout"] as? NSNumber,
+            let satoshisNum = entry["satoshis"] as? NSNumber,
+            let scriptHex = entry["scriptPubKeyHex"] as? String,
+            let scriptData = hexData(scriptHex),
+            var txIdData = hexData(txid) else {
+        throw Exception(name: "InvalidParams", description: "Invalid BCH UTXO entry")
+      }
+      txIdData.reverse()
+
+      var outPoint = BitcoinOutPoint()
+      outPoint.hash = txIdData
+      outPoint.index = UInt32(voutNum.intValue)
+
+      var utxo = BitcoinUnspentTransaction()
+      utxo.outPoint = outPoint
+      utxo.amount = satoshisNum.int64Value
+      utxo.script = scriptData
+      return utxo
+    }
+
+    let output: BitcoinSigningOutput = AnySigner.sign(input: input, coin: .bitcoinCash)
+    guard output.error == .ok else {
+      throw Exception(name: "SigningFailed", description: output.errorMessage)
+    }
+    return output.encoded.hexString
   }
 
   // MARK: - BTC / LTC (UTXO-based)
@@ -429,12 +509,179 @@ enum ChainSigner {
     return ChainSigner.Result(signedTx: output.encoded, meta: ["txHash": output.hash.hexString])
   }
 
+  // MARK: - Cosmos (ATOM)
+  // txParams: { accountNumber, sequence, chainId, feeAmount, gas, memo, fromAddress, toAddress,
+  //             amount (uatom, decimal string), denom }
+  // Returns output.serialized — the ready-to-broadcast JSON
+  // {"mode":"BROADCAST_MODE_SYNC","tx_bytes":"<base64>"} posted directly to the Cosmos LCD.
+  private static func signCosmos(wallet: HDWallet, txParams: [String: Any]) throws -> String {
+    guard let fromAddress = txParams["fromAddress"] as? String,
+          let toAddress = txParams["toAddress"] as? String,
+          let amountStr = txParams["amount"] as? String,
+          let feeAmountStr = txParams["feeAmount"] as? String,
+          let denom = txParams["denom"] as? String,
+          let chainId = txParams["chainId"] as? String,
+          let accountNumberNum = txParams["accountNumber"] as? NSNumber,
+          let sequenceNum = txParams["sequence"] as? NSNumber,
+          let gasNum = txParams["gas"] as? NSNumber else {
+      throw Exception(name: "InvalidParams", description: "Missing required Cosmos tx params")
+    }
+    let memo = (txParams["memo"] as? String) ?? ""
+
+    let privateKey = wallet.getKeyForCoin(coin: .cosmos)
+
+    var sendAmount = CosmosAmount()
+    sendAmount.denom = denom
+    sendAmount.amount = amountStr
+
+    var send = CosmosMessage.Send()
+    send.fromAddress = fromAddress
+    send.toAddress = toAddress
+    send.amounts = [sendAmount]
+
+    var message = CosmosMessage()
+    message.sendCoinsMessage = send
+
+    var feeAmt = CosmosAmount()
+    feeAmt.denom = denom
+    feeAmt.amount = feeAmountStr
+
+    var fee = CosmosFee()
+    fee.amounts = [feeAmt]
+    fee.gas = UInt64(gasNum.intValue)
+
+    var input = CosmosSigningInput()
+    input.signingMode = .protobuf
+    input.accountNumber = UInt64(accountNumberNum.intValue)
+    input.chainID = chainId
+    input.sequence = UInt64(sequenceNum.intValue)
+    input.memo = memo
+    input.fee = fee
+    input.messages = [message]
+    input.privateKey = privateKey.data
+    input.mode = .sync
+
+    let output: CosmosSigningOutput = AnySigner.sign(input: input, coin: .cosmos)
+    guard output.error == .ok else {
+      throw Exception(name: "SigningFailed", description: output.errorMessage)
+    }
+    return output.serialized
+  }
+
+  // MARK: - Aptos (APT)
+  // txParams: { sender, sequenceNumber, maxGasAmount, gasUnitPrice, expirationTimestampSecs,
+  //             chainId, toAddress, amount (octas, decimal string) }
+  // Returns output.json — the signed JSON body posted directly to the Aptos REST API.
+  private static func signAptos(wallet: HDWallet, txParams: [String: Any]) throws -> String {
+    guard let sender = txParams["sender"] as? String,
+          let toAddress = txParams["toAddress"] as? String,
+          let amountStr = txParams["amount"] as? String,
+          let seqNum = txParams["sequenceNumber"] as? NSNumber,
+          let maxGas = txParams["maxGasAmount"] as? NSNumber,
+          let gasPrice = txParams["gasUnitPrice"] as? NSNumber,
+          let expiry = txParams["expirationTimestampSecs"] as? NSNumber,
+          let chainId = txParams["chainId"] as? NSNumber else {
+      throw Exception(name: "InvalidParams", description: "Missing required Aptos tx params")
+    }
+    guard let amountOctas = UInt64(amountStr) else {
+      throw Exception(name: "InvalidParams", description: "Invalid Aptos amount: \(amountStr)")
+    }
+
+    let privateKey = wallet.getKeyForCoin(coin: .aptos)
+
+    var transfer = AptosTransferMessage()
+    transfer.to = toAddress
+    transfer.amount = amountOctas
+
+    var input = AptosSigningInput()
+    input.sender = sender
+    input.sequenceNumber = Int64(seqNum.intValue)
+    input.maxGasAmount = UInt64(maxGas.intValue)
+    input.gasUnitPrice = UInt64(gasPrice.intValue)
+    input.expirationTimestampSecs = UInt64(expiry.intValue)
+    input.chainID = UInt32(chainId.intValue)
+    input.privateKey = privateKey.data
+    input.transfer = transfer
+
+    let output: AptosSigningOutput = AnySigner.sign(input: input, coin: .aptos)
+    guard output.error == .ok else {
+      throw Exception(name: "SigningFailed", description: output.errorMessage)
+    }
+    return output.json
+  }
+
+  // MARK: - Tezos (XTZ)
+  // txParams: { branch, fromAddress, toAddress, counter, amount (mutez), fee (mutez),
+  //             gasLimit, storageLimit, needsReveal }
+  // Returns output.encoded hex — posted to /injection/operation as a JSON-encoded string.
+  private static func signTezos(wallet: HDWallet, txParams: [String: Any]) throws -> String {
+    guard let branch = txParams["branch"] as? String,
+          let fromAddress = txParams["fromAddress"] as? String,
+          let toAddress = txParams["toAddress"] as? String,
+          let counterNum = txParams["counter"] as? NSNumber,
+          let amountNum = txParams["amount"] as? NSNumber,
+          let feeNum = txParams["fee"] as? NSNumber,
+          let gasLimitNum = txParams["gasLimit"] as? NSNumber,
+          let storageLimitNum = txParams["storageLimit"] as? NSNumber else {
+      throw Exception(name: "InvalidParams", description: "Missing required Tezos tx params")
+    }
+    let needsReveal = (txParams["needsReveal"] as? Bool) ?? false
+    let counter = counterNum.int64Value
+
+    let privateKey = wallet.getKeyForCoin(coin: .tezos)
+    var operations: [TezosOperation] = []
+
+    if needsReveal {
+      let pubKey = privateKey.getPublicKeyEd25519()
+      var revealData = TezosRevealOperationData()
+      revealData.publicKey = pubKey.data
+
+      var reveal = TezosOperation()
+      reveal.source = fromAddress
+      reveal.counter = counter - 1
+      reveal.fee = 1420
+      reveal.gasLimit = 10600
+      reveal.storageLimit = 0
+      reveal.kind = .reveal
+      reveal.revealOperationData = revealData
+      operations.append(reveal)
+    }
+
+    var txData = TezosTransactionOperationData()
+    txData.destination = toAddress
+    txData.amount = amountNum.int64Value
+
+    var txOp = TezosOperation()
+    txOp.source = fromAddress
+    txOp.counter = counter
+    txOp.fee = feeNum.int64Value
+    txOp.gasLimit = gasLimitNum.int64Value
+    txOp.storageLimit = storageLimitNum.int64Value
+    txOp.kind = .transaction
+    txOp.transactionOperationData = txData
+    operations.append(txOp)
+
+    var opList = TezosOperationList()
+    opList.branch = branch
+    opList.operations = operations
+
+    var input = TezosSigningInput()
+    input.operationList = opList
+    input.privateKey = privateKey.data
+
+    let output: TezosSigningOutput = AnySigner.sign(input: input, coin: .tezos)
+    guard output.error == .ok else {
+      throw Exception(name: "SigningFailed", description: output.errorMessage)
+    }
+    return output.encoded.hexString
+  }
+
   // MARK: - Transaction summary for native confirmation UI
 
   static func buildSummary(chain: ChainKey, unsignedTx: [String: Any]) throws -> String {
     var lines = ["Network: \(chain.rawValue.uppercased())"]
     switch chain {
-    case .ethereum, .bnb, .polygon:
+    case .ethereum, .bnb, .polygon, .avax, .base, .arbitrum, .optimism, .sonic:
       if let to = unsignedTx["to"] as? String { lines.append("To: \(fmtAddr(to))") }
       let val_ = txHexToDouble((unsignedTx["valueHex"] as? String) ?? "0")
       lines.append("Amount: \(fmtAmt(val_ / 1e18)) \(chain.symbol)")
@@ -467,7 +714,7 @@ enum ChainSigner {
         }
       }
 
-    case .bitcoin, .litecoin:
+    case .bitcoin, .dogecoin, .litecoin:
       if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
       let sendSats = (unsignedTx["sendAmountSats"] as? String).flatMap(Int64.init) ?? 0
       if sendSats > 0 { lines.append("Amount: \(fmtAmt(Double(sendSats) / 1e8)) \(chain.symbol)") }
@@ -565,7 +812,46 @@ enum ChainSigner {
       }
 
     case .bitcoincash:
-      break
+      if let descriptorJson = unsignedTx["unsignedDescriptorJson"] as? String,
+         let data = descriptorJson.data(using: .utf8),
+         let descriptor = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        if let to = descriptor["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+        if let sats = (descriptor["sendAmountSats"] as? NSNumber)?.int64Value {
+          lines.append("Amount: \(fmtAmt(Double(sats) / 1e8)) BCH")
+        }
+      }
+
+    case .cosmos:
+      if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+      if let uatom = (unsignedTx["amount"] as? String).flatMap(Int64.init) {
+        lines.append("Amount: \(fmtAmt(Double(uatom) / 1_000_000)) ATOM")
+      }
+      if let feeUatom = (unsignedTx["feeAmount"] as? String).flatMap(Int64.init) {
+        lines.append("Fee: \(fmtAmt(Double(feeUatom) / 1_000_000)) ATOM")
+      }
+
+    case .aptos:
+      if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+      if let octas = (unsignedTx["amount"] as? String).flatMap(UInt64.init) {
+        lines.append("Amount: \(fmtAmt(Double(octas) / 1e8)) APT")
+      }
+      if let maxGas = (unsignedTx["maxGasAmount"] as? NSNumber)?.uint64Value,
+         let gasPrice = (unsignedTx["gasUnitPrice"] as? NSNumber)?.uint64Value {
+        let feeOctas = maxGas * gasPrice
+        lines.append("Max fee: \(fmtAmt(Double(feeOctas) / 1e8)) APT")
+      }
+
+    case .tezos:
+      if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+      if let mutez = (unsignedTx["amount"] as? NSNumber)?.int64Value {
+        lines.append("Amount: \(fmtAmt(Double(mutez) / 1_000_000)) XTZ")
+      }
+      if let feeMutez = (unsignedTx["fee"] as? NSNumber)?.int64Value {
+        lines.append("Fee: \(fmtAmt(Double(feeMutez) / 1_000_000)) XTZ")
+      }
+      if let reveal = unsignedTx["needsReveal"] as? Bool, reveal {
+        lines.append("(includes reveal operation)")
+      }
     }
     return lines.joined(separator: "\n")
   }
