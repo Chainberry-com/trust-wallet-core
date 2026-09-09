@@ -38,14 +38,20 @@ const TrustWalletCore = requireNativeModule("TrustWalletCore");
  * `isTestnet` selects the address format for BTC/LTC/BCH (every other chain's address is
  * identical on mainnet and testnet) — callers should pass `IS_TESTNET` from
  * `@/constants/wallet-env`. */
-export async function createWallet(strength: 128 | 256 = 128, isTestnet = false): Promise<WalletSummary> {
+export async function createWallet(
+  strength: 128 | 256 = 128,
+  isTestnet = false,
+): Promise<WalletSummary> {
   return TrustWalletCore.createWallet(strength, isTestnet);
 }
 
 /** One-time mnemonic exposure from the caller — persisted natively immediately, never
  * retained in JS after this call returns. No BIP-39 passphrase support (see `createWallet`).
  * `isTestnet` — see `createWallet`. */
-export async function importWallet(mnemonic: string, isTestnet = false): Promise<WalletSummary> {
+export async function importWallet(
+  mnemonic: string,
+  isTestnet = false,
+): Promise<WalletSummary> {
   return TrustWalletCore.importWallet(mnemonic, isTestnet);
 }
 
@@ -68,7 +74,12 @@ export async function signTransaction(
   unsignedTx: Record<string, unknown>,
   isTestnet = false,
 ): Promise<SignResult> {
-  return TrustWalletCore.signTransaction(walletId, chain, unsignedTx, isTestnet);
+  return TrustWalletCore.signTransaction(
+    walletId,
+    chain,
+    unsignedTx,
+    isTestnet,
+  );
 }
 
 /** The one sanctioned mnemonic exposure — explicit backup/reveal flow only, gated behind

@@ -1,11 +1,13 @@
 package com.chainberry.trustwalletcore
 
 import android.app.AlertDialog
+import android.util.Log
 import androidx.fragment.app.FragmentActivity
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.suspendCancellableCoroutine
 import wallet.core.jni.HDWallet
 import java.util.UUID
@@ -21,6 +23,13 @@ class ChainberryTrustWalletCoreModule : Module() {
       // Must be loaded once before any JNI calls
       System.loadLibrary("TrustWalletCore")
     }
+
+    // Global, not per-walletId: createWallet/importWallet/deleteWallet all read-modify-write the
+    // *entire* metadata map, so two concurrent calls touching different wallet ids would still
+    // race each other on that shared blob — a per-id lock wouldn't protect against that. See
+    // docs/adr/0002. A single companion-object Mutex (rather than an instance property) keeps
+    // this a true process-wide lock even if more than one module instance is ever created.
+    private val lifecycleMutex = Mutex()
   }
 
   private val context get() = appContext.reactContext
@@ -30,8 +39,52 @@ class ChainberryTrustWalletCoreModule : Module() {
     get() = appContext.currentActivity as? FragmentActivity
       ?: throw CodedException("NoActivity", "No foreground FragmentActivity to host the biometric prompt", null)
 
+  /**
+   * Serializes the whole body — including the biometric/device-credential prompt, not just the
+   * store writes — against every other lifecycle-mutating call, so at most one is ever touching
+   * the shared metadata store at a time (see docs/adr/0002). Also forecloses a second, separate
+   * bug: two concurrent `BiometricPrompt` invocations racing each other.
+   *
+   * [rejectIfBusy] chooses the policy for a caller that finds the lock already held:
+   * `createWallet`/`importWallet` reject immediately (`ERR_WALLET_OPERATION_IN_PROGRESS`) so a
+   * double-tap can never mint two wallets; `deleteWallet` queues instead, since two distinct
+   * deletes are both legitimate and should both eventually happen.
+   */
+  private suspend fun <T> withLifecycleLock(rejectIfBusy: Boolean, body: suspend () -> T): T {
+    if (rejectIfBusy) {
+      if (!lifecycleMutex.tryLock()) {
+        throw CodedException(
+          "ERR_WALLET_OPERATION_IN_PROGRESS",
+          "Another wallet operation is already in progress",
+          null,
+        )
+      }
+    } else {
+      lifecycleMutex.lock()
+    }
+    try {
+      return body()
+    } finally {
+      lifecycleMutex.unlock()
+    }
+  }
+
   override fun definition() = ModuleDefinition {
     Name("TrustWalletCore")
+
+    // Runs once, right after module init, before any of the AsyncFunctions below can be
+    // reached from JS — so nothing can legitimately be mid-operation yet, which is exactly what
+    // makes a one-shot pass here sufficient (no lock/grace-period needed against an in-flight
+    // call). This is the actual crash-safety mechanism for an interrupted create/delete; see
+    // CONTEXT.md and docs/adr/0001. Never allowed to block or crash startup.
+    OnCreate {
+      val reactContext = appContext.reactContext
+      if (reactContext == null) {
+        Log.w("TrustWalletCoreModule", "reconciliation: react context unavailable at module init, skipping")
+      } else {
+        NativeWalletStore.reconcileOrphans(reactContext)
+      }
+    }
 
     // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses }.
     // No BIP-39 passphrase support: signTransaction always reconstructs the wallet with an
@@ -62,13 +115,21 @@ class ChainberryTrustWalletCoreModule : Module() {
     // anything is deleted, same gate as `signTransaction`/`exportMnemonic`. A
     // compromised/malicious JS caller can still invoke this directly (there's no UI call
     // site today), so the gate must live here rather than in JS.
+    //
+    // Removes the metadata entry *before* the secret (mnemonic file + Keystore key) — the
+    // reverse of the old ordering. If this is interrupted between the two steps, the wallet is
+    // already gone from `listWallets` and only an orphaned secret-side resource is left behind,
+    // which the next app launch's reconciliation pass cleans up (see docs/adr/0001) — never a
+    // metadata record still pointing at a secret that's already gone.
     AsyncFunction("deleteWallet") Coroutine { walletId: String ->
-      val id = NativeWalletStore.validateWalletId(walletId)
-      NativeWalletStore.confirmIdentity(activity, context, "Delete wallet")
-      NativeWalletStore.deleteMnemonic(context, id)
-      val metadata = NativeWalletStore.loadMetadata(context).toMutableMap()
-      metadata.remove(id)
-      NativeWalletStore.saveMetadata(context, metadata)
+      withLifecycleLock(rejectIfBusy = false) {
+        val id = NativeWalletStore.validateWalletId(walletId)
+        NativeWalletStore.confirmIdentity(activity, context, "Delete wallet")
+        val metadata = NativeWalletStore.loadMetadata(context).toMutableMap()
+        metadata.remove(id)
+        NativeWalletStore.saveMetadata(context, metadata)
+        NativeWalletStore.deleteMnemonic(context, id)
+      }
     }
 
     // Triggers the native biometry/device-credential prompt, then signs entirely in-process.

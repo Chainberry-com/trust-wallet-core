@@ -21,6 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
 import java.security.KeyStore
+import java.util.Collections
 import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -235,6 +236,22 @@ object NativeWalletStore {
    * which of these two aliases exists for it (see [resolveExistingMode]), with no separate
    * metadata field needed. */
   internal fun keyAlias(mode: AuthMode, walletId: String): String = KEY_ALIAS_PREFIX + mode.aliasInfix + walletId
+
+  /** Inverse of [keyAlias]: recovers `(mode, walletId)` from a raw Keystore alias string, or
+   * `null` if it doesn't match this module's alias scheme at all (some other feature's Keystore
+   * entry, sharing the same `AndroidKeyStore` provider). Checks the longer/specific infixes
+   * (`bio_`, `cred_`) before the empty [AuthMode.LEGACY_COMBINED] infix, which would otherwise
+   * match every alias under [KEY_ALIAS_PREFIX] — relies on [AuthMode.entries] iterating in
+   * declaration order, same assumption [resolveExistingMode] makes. Used by [reconcileOrphans]
+   * to identify which Keystore aliases belong to which wallet id, without needing a Context. */
+  internal fun parseKeyAlias(alias: String): Pair<AuthMode, String>? {
+    if (!alias.startsWith(KEY_ALIAS_PREFIX)) return null
+    for (mode in AuthMode.entries) {
+      val prefix = KEY_ALIAS_PREFIX + mode.aliasInfix
+      if (alias.startsWith(prefix)) return mode to alias.removePrefix(prefix)
+    }
+    return null
+  }
 
   private fun getOrCreateKey(walletId: String, mode: AuthMode): SecretKey {
     val alias = keyAlias(mode, walletId)
@@ -579,6 +596,81 @@ object NativeWalletStore {
 
   fun loadMetadata(context: Context): Map<String, Map<String, String>> {
     return loadMetadataFromFile(metadataFile(context))
+  }
+
+  // MARK: - Reconciliation (see CONTEXT.md "orphan"/"reconciliation pass", docs/adr/0001)
+
+  /** Every `.enc` file in [walletsDir] whose wallet id has no entry in [liveIds] — the
+   * file-side half of an orphan. Pure/`File`-based so it's unit-testable on the plain JVM.
+   * Deliberately does not also match `METADATA_FILE` itself: that file has no `.enc` suffix. */
+  internal fun findOrphanFiles(walletsDir: File, liveIds: Set<String>): List<File> =
+    walletsDir.listFiles { f -> f.name.endsWith(".enc") }
+      ?.filter { it.name.removeSuffix(".enc") !in liveIds }
+      ?: emptyList()
+
+  /** Every leftover `metadata.json.tmp-*` file in [walletsDir] — pure litter from a
+   * [saveMetadataToFile] interrupted between writing the temp file and renaming it over the
+   * target (the rename itself is atomic, so the target is never at risk; only the temp file
+   * can be left behind). Not a security or correctness concern, just disk hygiene swept up
+   * alongside the real orphan checks since reconciliation is already scanning this directory. */
+  internal fun findStaleMetadataTempFiles(walletsDir: File): List<File> =
+    walletsDir.listFiles { f -> f.name.startsWith("$METADATA_FILE.tmp-") }?.toList() ?: emptyList()
+
+  /**
+   * Runs once at module init (see `TrustWalletCoreModule`'s `OnCreate`), before the JS layer can
+   * issue its first `createWallet`/`importWallet`/`deleteWallet` call — the actual source of
+   * crash-safety for an interrupted create or delete, not the in-call rollback in
+   * `persistNewWallet`. Android has *two* independently-persistable secret-side resources per
+   * wallet — the `.enc` file and its Keystore key alias, since [getOrCreateKey] creates the key
+   * before [saveMnemonic] ever writes the file — so both are checked against the metadata store
+   * independently, neither gated on the other's presence.
+   *
+   * Best-effort and never throws: any failure here is logged and skipped rather than propagated,
+   * since a broken reconciliation pass must never become "the app won't launch." A metadata entry
+   * with no matching secret-side resource (the reverse shape — a "zombie") is deliberately left
+   * untouched here; see [NativeWalletStoreError.NotFound] and docs/adr/0001 for why.
+   */
+  fun reconcileOrphans(context: Context) {
+    val liveIds = try {
+      loadMetadata(context).keys
+    } catch (e: Exception) {
+      Log.w(TAG, "reconciliation: failed to load metadata, skipping this pass entirely", e)
+      return
+    }
+
+    val dir = walletsDir(context)
+
+    try {
+      for (file in findOrphanFiles(dir, liveIds)) {
+        if (!file.delete()) {
+          Log.w(TAG, "reconciliation: failed to delete orphaned file ${file.name}")
+        }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "reconciliation: failed while cleaning up orphaned files", e)
+    }
+
+    try {
+      val ks = keyStore()
+      for (alias in Collections.list(ks.aliases())) {
+        val (_, walletId) = parseKeyAlias(alias) ?: continue
+        if (walletId !in liveIds) {
+          try {
+            ks.deleteEntry(alias)
+          } catch (e: Exception) {
+            Log.w(TAG, "reconciliation: failed to delete orphaned key alias $alias", e)
+          }
+        }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "reconciliation: failed while enumerating Keystore aliases", e)
+    }
+
+    try {
+      findStaleMetadataTempFiles(dir).forEach { it.delete() }
+    } catch (e: Exception) {
+      Log.w(TAG, "reconciliation: failed while cleaning up stale metadata temp files", e)
+    }
   }
 
   // MARK: - Biometric/device-credential prompt

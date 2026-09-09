@@ -229,4 +229,60 @@ enum NativeWalletStore {
     }
     return obj
   }
+
+  // MARK: - Reconciliation (see CONTEXT.md "orphan"/"reconciliation pass", docs/adr/0001)
+
+  /// Runs once at module init (see `TrustWalletCoreModule`'s `OnCreate`), before the JS layer can
+  /// issue its first `createWallet`/`importWallet`/`deleteWallet` call — the actual source of
+  /// crash-safety for an interrupted create or delete, not the in-call rollback in
+  /// `persistNewWallet`. Finds every Keychain item under `walletServicePrefix` with no matching
+  /// metadata entry and deletes it.
+  ///
+  /// Enumeration requires listing *every* generic-password item (`kSecMatchLimitAll`) — the
+  /// Keychain has no service-prefix query — and filtering client-side; this is safe today because
+  /// nothing else in this app touches the Keychain directly (see docs/adr/0001). If that ever
+  /// changes, this filter must stay airtight or it risks touching an unrelated item.
+  ///
+  /// Best-effort and never throws: any failure here is logged and skipped, since a broken
+  /// reconciliation pass must never become "the app won't launch." A metadata entry with no
+  /// matching Keychain item (the reverse shape — a "zombie") is deliberately left untouched here;
+  /// see `.notFound` and docs/adr/0001 for why.
+  static func reconcileOrphans() {
+    let liveIds: Set<String>
+    do {
+      liveIds = Set(try loadMetadata().keys)
+    } catch {
+      NSLog("[NativeWalletStore] reconciliation: failed to load metadata, skipping this pass entirely: \(error)")
+      return
+    }
+
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecMatchLimit as String: kSecMatchLimitAll,
+      kSecReturnAttributes as String: true,
+    ]
+    var result: AnyObject?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      NSLog("[NativeWalletStore] reconciliation: failed to enumerate Keychain items (OSStatus \(status))")
+      return
+    }
+    let items = (result as? [[String: Any]]) ?? []
+
+    for item in items {
+      guard let service = item[kSecAttrService as String] as? String,
+            service.hasPrefix(walletServicePrefix) else { continue }
+      let walletId = String(service.dropFirst(walletServicePrefix.count))
+      guard !liveIds.contains(walletId) else { continue }
+
+      let deleteStatus = SecItemDelete([
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: mnemonicAccount,
+      ] as CFDictionary)
+      if deleteStatus != errSecSuccess && deleteStatus != errSecItemNotFound {
+        NSLog("[NativeWalletStore] reconciliation: failed to delete orphaned item for \(walletId) (OSStatus \(deleteStatus))")
+      }
+    }
+  }
 }
