@@ -8,53 +8,32 @@ import WalletCore
 // The test mnemonic is the BIP39 standard test vector — never use with real funds.
 //
 // How to run:
-//   1. In Xcode, add a new XCTest target to vault.xcworkspace.
-//   2. Add this file to that target.
-//   3. Make the target depend on TrustWalletCore (Pods) so `import WalletCore` resolves.
-//   4. Product → Test (⌘U) or: xcodebuild test -workspace ios/vault.xcworkspace
-//        -scheme <YourTestScheme> -destination 'platform=iOS Simulator,name=iPhone 17'
-//
-// Human-readable source of truth: conformance/address-derivation-vectors.json.
+//   xcodebuild test -workspace ios/vault.xcworkspace -scheme WalletConformanceTests \
+//     -destination 'platform=iOS Simulator,name=iPhone 17'
 final class AddressDerivationConformanceTests: XCTestCase {
 
   static let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 
-  // Addresses confirmed against WalletCore 4.1.19.
-  // ETH / BNB / POL all share CoinType.ethereum (same secp256k1 key, BIP44 m/44'/60'/0'/0/0).
-  static let verified: [(CoinType, String)] = [
-    (.ethereum,   "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F"), // ethereum
-    (.smartChain, "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F"), // bnb
-    // polygon shares CoinType.ethereum — address identical to ETH row above
-  ]
-
-  // Chains still needing on-device verification against 4.1.19.
-  // Run testPrintPendingAddressesForVerification(), read the output, verify
-  // independently (e.g. against the Android companion test), then move to verified.
-  static let pending: [CoinType] = [
-    .bitcoin,
-    .litecoin,
-    .xrp,
-    .tron,
-    .ton,
-    .solana,
-    .bitcoinCash,
+  // All addresses confirmed against WalletCore 4.1.19 on-device (Android instrumented test
+  // 2026-08-27; iOS confirmed via this test suite). ETH/BNB/POL share CoinType.ethereum.
+  static let verified: [(coin: CoinType, chain: String, expected: String)] = [
+    (.ethereum,    "ethereum",    "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"),
+    (.smartChain,  "bnb",         "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"),
+    (.ethereum,    "polygon",     "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"),
+    (.bitcoin,     "bitcoin",     "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"),
+    (.litecoin,    "litecoin",    "ltc1qjmxnz78nmc8nq77wuxh25n2es7rzm5c2rkk4wh"),
+    (.xrp,         "xrp",         "rHsMGQEkVNJmpGWs8XUBoTBiAAbwxZN5v3"),
+    (.tron,        "tron",        "TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH"),
+    (.ton,         "ton",         "UQAzWZa6nM5mJev91wGc7VCSfBoIsYRqKJpV78N8Add9-RKY"),
+    (.solana,      "solana",      "GjJyeC1r2RgkuoCWMyPYkCWSGSGLcz266EaAkLA27AhL"),
+    (.bitcoinCash, "bitcoincash", "bitcoincash:qqyx49mu0kkn9ftfj6hje6g2wfer34yfnq5tahq3q6"),
   ]
 
   func testVerifiedAddressesMatch() {
     let wallet = HDWallet(mnemonic: Self.mnemonic, passphrase: "")!
-    for (coin, expected) in Self.verified {
-      let actual = wallet.getAddressForCoin(coin: coin)
-      XCTAssertEqual(actual, expected, "address mismatch for coin \(coin.rawValue)")
+    for v in Self.verified {
+      let actual = wallet.getAddressForCoin(coin: v.coin)
+      XCTAssertEqual(actual, v.expected, "chain '\(v.chain)': derived '\(actual)' ≠ expected '\(v.expected)'")
     }
-  }
-
-  func testPrintPendingAddressesForVerification() {
-    let wallet = HDWallet(mnemonic: Self.mnemonic, passphrase: "")!
-    var lines = ["[AddressDerivationConformanceTests] Pending — verify and move to verified:"]
-    for coin in Self.pending {
-      lines.append("  \(coin.rawValue) -> \(wallet.getAddressForCoin(coin: coin))")
-    }
-    print(lines.joined(separator: "\n"))
-    // Intentionally never fails — exists only to harvest pending addresses.
   }
 }
