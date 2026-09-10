@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, audit]
+    branches: [main, audit, amarPolish]
   pull_request:
-    branches: [main, audit]
+    branches: [main]
 
 # This module has no standalone Gradle wrapper or Xcode project of its own — it's an Expo
 # native library, meant to be autolinked into a host app. The Android jobs below solve that
@@ -49,6 +49,43 @@ jobs:
             --allow-warnings \
             --skip-import-validation \
             --quick
+
+  ios-conformance-tests:
+    name: iOS conformance tests (address/signing)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install example/ dependencies
+        working-directory: example
+        run: npm install
+      - name: expo prebuild --platform ios
+        working-directory: example
+        run: npx expo prebuild --platform ios --no-install
+      - name: pod install (with test specs)
+        working-directory: example/ios
+        run: |
+          LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 pod install --include-test-specs
+      - name: xcodebuild test — iOS conformance suite
+        working-directory: example/ios
+        run: |
+          SCHEME=$(xcodebuild -workspace *.xcworkspace -list 2>/dev/null \
+            | grep 'ChainberryTrustWalletCoreModule-ConformanceTests' | head -1 | xargs)
+          xcodebuild test \
+            -workspace *.xcworkspace \
+            -scheme "$SCHEME" \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            -resultBundlePath "$RUNNER_TEMP/ios-conformance.xcresult" \
+            | xcpretty --report junit --output "$RUNNER_TEMP/ios-conformance-junit.xml"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-conformance-test-results
+          path: ${{ runner.temp }}/ios-conformance.xcresult
+          retention-days: 7
 
   android-unit-tests:
     name: Android unit tests (JVM)

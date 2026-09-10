@@ -19,4 +19,10 @@ Pod::Spec.new do |s|
 
   s.dependency 'ExpoModulesCore'
   s.dependency 'TrustWalletCore', '4.1.19'
+
+  s.test_spec 'ConformanceTests' do |ts|
+    ts.source_files = 'ios/ConformanceTests/*.swift'
+    ts.dependency 'TrustWalletCore', '4.1.19'
+    ts.resources = ['conformance/signing-vectors.json', 'conformance/address-derivation-vectors.json']
+  end
 end
