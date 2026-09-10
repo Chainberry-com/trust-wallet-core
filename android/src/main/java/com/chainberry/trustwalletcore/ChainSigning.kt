@@ -13,14 +13,14 @@ import wallet.core.jni.Hash
 import wallet.core.jni.PrivateKey
 import wallet.core.jni.SolanaTransaction
 import wallet.core.jni.TransactionDecoder
+import wallet.core.jni.proto.Aptos
 import wallet.core.jni.proto.Bitcoin
 import wallet.core.jni.proto.Common
-import wallet.core.jni.proto.Aptos
 import wallet.core.jni.proto.Cosmos
-import wallet.core.jni.proto.Tezos
 import wallet.core.jni.proto.Ethereum
 import wallet.core.jni.proto.Ripple
 import wallet.core.jni.proto.Solana
+import wallet.core.jni.proto.Tezos
 import wallet.core.jni.proto.TheOpenNetwork
 import wallet.core.jni.proto.Tron
 import java.math.BigInteger
@@ -687,10 +687,10 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
       val firstContract = (unsignedTx["raw_data"] as? Map<String, Any>)
         ?.let { (it["contract"] as? List<Map<String, Any>>)?.firstOrNull() }
       firstContract?.let { contract ->
-        val type_ = contract["type"] as? String ?: ""
+        val contractType = contract["type"] as? String ?: ""
         val value = (contract["parameter"] as? Map<String, Any>)
           ?.let { it["value"] as? Map<String, Any> }
-        when (type_) {
+        when (contractType) {
           "TransferContract" -> value?.let { v ->
             (v["to_address"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
             (v["amount"] as? Number)?.let { lines += "Amount: ${fmtAmt(it.toDouble() / 1e6)} TRX" }
@@ -710,7 +710,7 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
               lines += "Contract call: ${stripped.length / 2} bytes — review carefully"
             }
           }
-          else -> if (type_.isNotEmpty()) lines += "Contract type: $type_ — review carefully"
+          else -> if (contractType.isNotEmpty()) lines += "Contract type: $contractType — review carefully"
         }
       }
       // Verify txID == SHA256(raw_data_hex). Both fields must be present — fail closed if either
@@ -743,7 +743,9 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
       // Fail closed — if descriptor is absent or unparseable we cannot show what will be signed.
       val descriptorJson = unsignedTx["unsignedDescriptorJson"] as? String
         ?: throw ChainSigningException("Cannot decode BCH descriptor — signing refused to prevent blind signing")
-      val descriptor = try { JSONObject(descriptorJson) } catch (_: Exception) {
+      val descriptor = try {
+        JSONObject(descriptorJson)
+      } catch (_: Exception) {
         throw ChainSigningException("Cannot parse BCH descriptor JSON — signing refused")
       }
       descriptor.optString("toAddress").takeIf { it.isNotEmpty() }?.let { lines += "To: ${fmtAddr(it)}" }
@@ -863,12 +865,16 @@ private fun decodeSolanaForSummary(b64: String): SolanaSummary? {
     }
 
     null
-  } catch (_: Exception) { null }
+  } catch (_: Exception) {
+    null
+  }
 }
 
 private fun txHexToDouble(hex: String): Double = try {
   BigInteger(hex.removePrefix("0x").ifEmpty { "0" }, 16).toDouble()
-} catch (_: NumberFormatException) { 0.0 }
+} catch (_: NumberFormatException) {
+  0.0
+}
 
 private fun fmtAmt(value: Double): String =
   "%.8f".format(value).trimEnd('0').trimEnd('.')
