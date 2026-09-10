@@ -6,10 +6,23 @@ on:
   pull_request:
     branches: [main, audit]
 
-# This module is an Expo native library — no standalone Gradle wrapper or Xcode project.
-# Full Android/iOS builds run via the parent project (mobile-vault). CI gates what it can:
-#   - TypeScript: type-check the JS API surface (no native deps needed)
-#   - iOS:        pod spec lint --quick (structural podspec check, no TrustWalletCore download)
+# This module has no standalone Gradle wrapper or Xcode project of its own — it's an Expo
+# native library, meant to be autolinked into a host app. The Android jobs below solve that
+# by building `example/`, a minimal Expo app whose only job is to `expo prebuild` a real
+# Android project that autolinks this module in (see example/README.md) — that's what lets
+# `android/build.gradle`'s `useCoreDependencies()` resolve a `:expo-modules-core` sibling
+# project instead of failing to configure at all. The generated Gradle project name is
+# `:chainberry-trust-wallet-core` (derived from package.json's `@chainberry/trust-wallet-core`).
+#
+#   - TypeScript:  type-check the JS API surface (no native deps needed)
+#   - iOS:         pod spec lint --quick (structural podspec check, no TrustWalletCore
+#                  download) — a real Xcode build/test still needs the parent app
+#                  (mobile-vault) or a wired-up XCTest target, see README.md's iOS gap note
+#   - Android:     real Gradle build against the pinned wallet-core 4.1.19, via example/
+#                  - unit tests (JVM, fast): AmountParsingConformanceTest, Bech32Test,
+#                    NativeWalletStoreTest
+#                  - instrumented tests (emulator): AddressDerivationConformanceTest,
+#                    SigningConformanceTest — the actual cross-chain conformance gate
 
 jobs:
   typescript:
@@ -32,7 +45,81 @@ jobs:
       - name: Lint podspec (structural, no compilation)
         run: |
           LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
-          pod spec lint TrustWalletCoreModule.podspec \
+          pod spec lint ChainberryTrustWalletCoreModule.podspec \
             --allow-warnings \
             --skip-import-validation \
             --quick
+
+  android-unit-tests:
+    name: Android unit tests (JVM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Install example/ dependencies (autolinks this module via file:.. dependency)
+        working-directory: example
+        run: npm install
+      - name: expo prebuild --platform android
+        working-directory: example
+        run: npx expo prebuild --platform android --no-install
+      - name: gradlew :chainberry-trust-wallet-core:testDebugUnitTest
+        working-directory: example/android
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          ./gradlew :chainberry-trust-wallet-core:testDebugUnitTest --no-daemon
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-unit-test-report
+          path: android/build/reports/tests/testDebugUnitTest
+          retention-days: 7
+
+  android-instrumented-tests:
+    name: Android instrumented tests (address/signing conformance)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Install example/ dependencies (autolinks this module via file:.. dependency)
+        working-directory: example
+        run: npm install
+      - name: expo prebuild --platform android
+        working-directory: example
+        run: npx expo prebuild --platform android --no-install
+      - name: Enable KVM (hardware acceleration for the emulator)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: gradlew :chainberry-trust-wallet-core:connectedDebugAndroidTest
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          working-directory: example/android
+          script: |
+            echo "sdk.dir=$ANDROID_HOME" > local.properties
+            ./gradlew :chainberry-trust-wallet-core:connectedDebugAndroidTest --no-daemon
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-instrumented-test-report
+          path: android/build/reports/androidTests/connected
+          retention-days: 7
