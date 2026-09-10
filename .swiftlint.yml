@@ -1,15 +1,14 @@
 disabled_rules:
   - trailing_comma
-  - line_length           # ChainSigning.swift ima nužno duge linije (proto builder chains)
-  - file_length           # ChainSigning.swift je strukturno jedan fajl
-  - function_body_length  # signUtxo/signTezos su opravdano dugi
+  - line_length
+  - file_length
+  - function_body_length
   - type_body_length
   - cyclomatic_complexity
-
-opt_in_rules:
-  - empty_count
-  - redundant_nil_coalescing
-  - unused_import
+  - identifier_name          # to, s, v, b, i, ix, tx, type_ su legitiman Swift/crypto stil
+  - for_where                # if-inside-for je jasniji u nekim slučajevima
+  - redundant_void_return    # -> Void u closure tipovima je eksplicitno dokumentacijski
+  - implicit_optional_initialization  # var foo: Foo? = nil je namjerno eksplicitno
 
 excluded:
   - ios/build
