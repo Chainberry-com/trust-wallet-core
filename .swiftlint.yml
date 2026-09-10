@@ -1,0 +1,18 @@
+disabled_rules:
+  - trailing_comma
+  - line_length           # ChainSigning.swift ima nužno duge linije (proto builder chains)
+  - file_length           # ChainSigning.swift je strukturno jedan fajl
+  - function_body_length  # signUtxo/signTezos su opravdano dugi
+  - type_body_length
+  - cyclomatic_complexity
+
+opt_in_rules:
+  - empty_count
+  - redundant_nil_coalescing
+  - unused_import
+
+excluded:
+  - ios/build
+  - ios/Pods
+  - ios/ConformanceTests
+  - example
