@@ -713,18 +713,17 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
           else -> if (type_.isNotEmpty()) lines += "Contract type: $type_ — review carefully"
         }
       }
-      (unsignedTx["txID"] as? String)?.let { txId ->
-        val rawHex = unsignedTx["raw_data_hex"] as? String
-        if (rawHex != null) {
-          val computed = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(rawHex.hexToBytes()).toHex()
-          if (computed.lowercase() != txId.lowercase())
-            throw ChainSigningException("TRX txID does not match SHA256(raw_data_hex) — signing refused")
-          lines += "TxID verified ✓"
-        } else {
-          lines += "TxID: ${txId.take(16)}… (raw_data_hex absent — unverified)"
-        }
-      }
+      // Verify txID == SHA256(raw_data_hex). Both fields must be present — fail closed if either
+      // is absent so a JS caller cannot suppress the integrity check by omitting raw_data_hex.
+      val txId = unsignedTx["txID"] as? String
+        ?: throw ChainSigningException("TRX txID missing — signing refused")
+      val rawHex = unsignedTx["raw_data_hex"] as? String
+        ?: throw ChainSigningException("TRX raw_data_hex missing — cannot verify txID, signing refused")
+      val computed = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(rawHex.hexToBytes()).toHex()
+      if (computed.lowercase() != txId.lowercase())
+        throw ChainSigningException("TRX txID does not match SHA256(raw_data_hex) — signing refused")
+      lines += "TxID verified ✓"
     }
     ChainKey.SOLANA -> {
       val info = (unsignedTx["unsignedTxBase64"] as? String)?.let { decodeSolanaForSummary(it) }
@@ -740,14 +739,26 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
         if (!info.isTransfer) lines += "Non-transfer instruction — review carefully"
       }
     }
-    ChainKey.SOLANA -> lines += "(Solana — details verified by the network)"
     ChainKey.BITCOINCASH -> {
-      try {
-        val descriptor = JSONObject((unsignedTx["unsignedDescriptorJson"] as? String) ?: "")
-        descriptor.optString("toAddress").takeIf { it.isNotEmpty() }?.let { lines += "To: ${fmtAddr(it)}" }
-        val sats = descriptor.optLong("sendAmountSats", -1L)
-        if (sats >= 0) lines += "Amount: ${fmtAmt(sats.toDouble() / 1e8)} BCH"
-      } catch (_: Exception) {}
+      // Fail closed — if descriptor is absent or unparseable we cannot show what will be signed.
+      val descriptorJson = unsignedTx["unsignedDescriptorJson"] as? String
+        ?: throw ChainSigningException("Cannot decode BCH descriptor — signing refused to prevent blind signing")
+      val descriptor = try { JSONObject(descriptorJson) } catch (_: Exception) {
+        throw ChainSigningException("Cannot parse BCH descriptor JSON — signing refused")
+      }
+      descriptor.optString("toAddress").takeIf { it.isNotEmpty() }?.let { lines += "To: ${fmtAddr(it)}" }
+      val sendSats = descriptor.optLong("sendAmountSats", -1L)
+      if (sendSats >= 0) lines += "Amount: ${fmtAmt(sendSats.toDouble() / 1e8)} BCH"
+      descriptor.optString("changeAddress").takeIf { it.isNotEmpty() }?.let { lines += "Change to: ${fmtAddr(it)}" }
+      val spb = descriptor.optInt("satsPerByte", -1)
+      if (spb >= 0) lines += "Fee rate: $spb sat/vB"
+      @Suppress("UNCHECKED_CAST")
+      val inputTotal = (unsignedTx["inputs"] as? List<Map<String, Any>>)
+        ?.mapNotNull { (it["amountSats"] as? String)?.toLongOrNull() }
+        ?.fold(0L, Long::plus) ?: descriptor.optLong("inputTotalSats", 0L)
+      val changeSats = descriptor.optLong("changeAmountSats", 0L)
+      val totalFee = inputTotal - sendSats.coerceAtLeast(0L) - changeSats
+      if (totalFee > 0) lines += "Total fee: ${fmtAmt(totalFee.toDouble() / 1e8)} BCH"
     }
     ChainKey.COSMOS -> {
       (unsignedTx["toAddress"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
