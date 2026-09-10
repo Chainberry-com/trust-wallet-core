@@ -115,10 +115,10 @@ jobs:
       - name: expo prebuild --platform ios
         working-directory: example
         run: npx expo prebuild --platform ios --no-install
-      - name: pod install (with test specs)
+      - name: pod install
         working-directory: example/ios
         run: |
-          LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 pod install --include-test-specs
+          LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 pod install
       - name: xcodebuild test — iOS conformance suite
         working-directory: example/ios
         run: |

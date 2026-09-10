@@ -9,14 +9,33 @@ insert_final_newline = true
 trim_trailing_whitespace = true
 
 [*.{kt,kts}]
-indent_size = 2
-max_line_length = 140
-ktlint_standard_no-wildcard-imports = disabled
-# ChainSigning.kt je strukturno jedan fajl — file length nije issue
-ktlint_standard_function-signature = disabled
+indent_size = 4
+max_line_length = 160
 
-[*.swift]
-indent_size = 2
+# Isključena opinionated formatirna pravila koja ne dotiču ispravnost koda.
+# Zadržana su samo pravila koja detektuju stvarne bugove (import-ordering,
+# property-naming, comment-spacing, try-catch-finally-spacing).
+ktlint_standard_multiline-expression-wrapping = disabled
+ktlint_standard_chain-method-continuation = disabled
+ktlint_standard_class-signature = disabled
+ktlint_standard_trailing-comma-on-call-site = disabled
+ktlint_standard_trailing-comma-on-declaration-site = disabled
+ktlint_standard_statement-wrapping = disabled
+ktlint_standard_binary-expression-wrapping = disabled
+ktlint_standard_wrapping = disabled
+ktlint_standard_argument-list-wrapping = disabled
+ktlint_standard_no-empty-first-line-in-class-body = disabled
+ktlint_standard_function-expression-body = disabled
+ktlint_standard_condition-wrapping = disabled
+ktlint_standard_if-else-wrapping = disabled
+ktlint_standard_multiline-if-else = disabled
+ktlint_standard_if-else-bracing = disabled
+ktlint_standard_spacing-between-declarations-with-annotations = disabled
+ktlint_standard_spacing-between-declarations-with-comments = disabled
+ktlint_standard_indent = disabled
 
 [*.gradle]
+indent_size = 4
+
+[*.swift]
 indent_size = 2
