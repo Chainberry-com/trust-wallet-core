@@ -9,7 +9,7 @@ insert_final_newline = true
 trim_trailing_whitespace = true
 
 [*.{kt,kts}]
-indent_size = 4
+indent_size = 2
 max_line_length = 160
 
 # Isključena opinionated formatirna pravila koja ne dotiču ispravnost koda.
@@ -32,8 +32,6 @@ ktlint_standard_multiline-if-else = disabled
 ktlint_standard_if-else-bracing = disabled
 ktlint_standard_spacing-between-declarations-with-annotations = disabled
 ktlint_standard_spacing-between-declarations-with-comments = disabled
-ktlint_standard_indent = disabled
-
 [*.gradle]
 indent_size = 4
 
