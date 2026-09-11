@@ -69,11 +69,26 @@ class NativeWalletStoreTest {
   fun metadata_roundTrips() {
     val file = File(tmp.root, "metadata.json")
     val wallets = mapOf(
-      "id-1" to mapOf("ethereum" to "0xabc"),
-      "id-2" to mapOf("bitcoin" to "bc1abc"),
+      "id-1" to NativeWalletStore.WalletRecord(isTestnet = false, addresses = mapOf("ethereum" to "0xabc")),
+      "id-2" to NativeWalletStore.WalletRecord(isTestnet = true, addresses = mapOf("bitcoin" to "bc1abc")),
     )
     NativeWalletStore.saveMetadataToFile(file, wallets)
     assertEquals(wallets, NativeWalletStore.loadMetadataFromFile(file))
+  }
+
+  @Test
+  fun metadata_legacyFlatShapeThrowsCorrupted_notSilentlyMisread() {
+    // Data written by a pre-migration build (walletId -> {chain: address} with no
+    // isTestnet/addresses wrapper) must never be silently reinterpreted — there is no
+    // migration path, so this must surface as Corrupted, same as any other unexpected shape.
+    val file = File(tmp.root, "metadata.json")
+    file.writeText("""{"id-1":{"ethereum":"0xabc"}}""")
+    try {
+      NativeWalletStore.loadMetadataFromFile(file)
+      fail("expected Corrupted for legacy flat-shape metadata")
+    } catch (e: NativeWalletStoreError.Corrupted) {
+      // expected
+    }
   }
 
   @Test
@@ -99,7 +114,7 @@ class NativeWalletStoreTest {
   @Test
   fun metadata_failedWrite_leavesExistingFileUntouched() {
     val target = File(tmp.root, "metadata.json")
-    val original = mapOf("id-1" to mapOf("ethereum" to "0xabc"))
+    val original = mapOf("id-1" to NativeWalletStore.WalletRecord(isTestnet = false, addresses = mapOf("ethereum" to "0xabc")))
     NativeWalletStore.saveMetadataToFile(target, original)
 
     // Making the parent directory read-only blocks creating the temp file at all (the
@@ -111,7 +126,10 @@ class NativeWalletStoreTest {
     target.parentFile!!.setWritable(false)
     try {
       try {
-        NativeWalletStore.saveMetadataToFile(target, mapOf("id-2" to mapOf("bitcoin" to "bc1xyz")))
+        NativeWalletStore.saveMetadataToFile(
+          target,
+          mapOf("id-2" to NativeWalletStore.WalletRecord(isTestnet = false, addresses = mapOf("bitcoin" to "bc1xyz"))),
+        )
         // Some filesystems/CI runners ignore setWritable(false) for the owner (e.g. root).
         // If the write unexpectedly succeeded, there's nothing to assert here.
       } catch (e: NativeWalletStoreError.PermissionDenied) {

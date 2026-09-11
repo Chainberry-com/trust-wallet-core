@@ -86,19 +86,21 @@ class ChainberryTrustWalletCoreModule : Module() {
       }
     }
 
-    // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses }.
+    // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses, isTestnet }.
     // No BIP-39 passphrase support: signTransaction always reconstructs the wallet with an
     // empty passphrase, so accepting one here would derive addresses from a seed different
     // from the one actually used to sign — always pass "" to stay consistent with that.
     // isTestnet selects the address format for BTC/LTC/BCH (see ChainSigner.addressForChain) —
-    // every other chain's address is the same on mainnet and testnet.
+    // every other chain's address is the same on mainnet and testnet. This value is persisted
+    // as immutable per-wallet metadata (NativeWalletStore.WalletRecord) — signTransaction reads
+    // it back from there instead of accepting it as a parameter, so it can never drift.
     AsyncFunction("createWallet") Coroutine { strength: Int, isTestnet: Boolean ->
       val wallet = HDWallet(strength, "")
       persistNewWallet(wallet, isTestnet)
     }
 
     // One-time mnemonic exposure from JS, at import only — never retained after this call.
-    // Returns { walletId, addresses }. No BIP-39 passphrase support (see `createWallet`).
+    // Returns { walletId, addresses, isTestnet }. No BIP-39 passphrase support (see `createWallet`).
     AsyncFunction("importWallet") Coroutine { mnemonic: String, isTestnet: Boolean ->
       val wallet = HDWallet(mnemonic, "") // throws on invalid mnemonic
       persistNewWallet(wallet, isTestnet)
@@ -106,8 +108,8 @@ class ChainberryTrustWalletCoreModule : Module() {
 
     // Reads only the ungated metadata store — no biometric prompt.
     AsyncFunction("listWallets") {
-      NativeWalletStore.loadMetadata(context).map { (walletId, addresses) ->
-        mapOf("walletId" to walletId, "addresses" to addresses)
+      NativeWalletStore.loadMetadata(context).map { (walletId, record) ->
+        mapOf("walletId" to walletId, "addresses" to record.addresses, "isTestnet" to record.isTestnet)
       }
     }
 
@@ -133,9 +135,11 @@ class ChainberryTrustWalletCoreModule : Module() {
     }
 
     // Triggers the native biometry/device-credential prompt, then signs entirely in-process.
-    // Returns { signedTx, meta? }. isTestnet must match whatever `createWallet`/`importWallet`
-    // used — see ChainSigner.keyForChain (a mismatch signs with the wrong key for BTC/LTC).
-    AsyncFunction("signTransaction") Coroutine { walletId: String, chain: String, unsignedTx: Map<String, Any>, isTestnet: Boolean ->
+    // Returns { signedTx, meta? }. Network mode (mainnet/testnet) is read from the wallet's own
+    // persisted record, not accepted as a parameter — see ChainSigner.keyForChain and
+    // NativeWalletStore.WalletRecord for why a caller-supplied value here could sign with the
+    // wrong key for BTC/LTC.
+    AsyncFunction("signTransaction") Coroutine { walletId: String, chain: String, unsignedTx: Map<String, Any> ->
       val id = NativeWalletStore.validateWalletId(walletId)
       val chainKey = ChainKey.fromJs(chain)
       confirmTransaction(chainKey, unsignedTx)
@@ -145,21 +149,20 @@ class ChainberryTrustWalletCoreModule : Module() {
       // Backfill any addresses missing from metadata (chains added after wallet was created).
       // Runs silently after the biometric gate — no extra prompt needed.
       val metadata = NativeWalletStore.loadMetadata(context).toMutableMap()
-      @Suppress("UNCHECKED_CAST")
-      val storedAddresses = (metadata[id] as? Map<String, String>)?.toMutableMap()
-      if (storedAddresses != null) {
-        var changed = false
-        for (chainEntry in ChainKey.entries) {
-          val key = chainEntry.name.lowercase()
-          if (!storedAddresses.containsKey(key)) {
-            storedAddresses[key] = ChainSigner.addressForChain(wallet, chainEntry, isTestnet)
-            changed = true
-          }
+      val record = metadata[id] ?: throw NativeWalletStoreError.NotFound(id)
+      val isTestnet = record.isTestnet
+      val storedAddresses = record.addresses.toMutableMap()
+      var changed = false
+      for (chainEntry in ChainKey.entries) {
+        val key = chainEntry.name.lowercase()
+        if (!storedAddresses.containsKey(key)) {
+          storedAddresses[key] = ChainSigner.addressForChain(wallet, chainEntry, isTestnet)
+          changed = true
         }
-        if (changed) {
-          metadata[id] = storedAddresses
-          runCatching { NativeWalletStore.saveMetadata(context, metadata) }
-        }
+      }
+      if (changed) {
+        metadata[id] = record.copy(addresses = storedAddresses)
+        runCatching { NativeWalletStore.saveMetadata(context, metadata) }
       }
       val result = ChainSigner.sign(chainKey, wallet, unsignedTx, isTestnet)
       val response = mutableMapOf<String, Any>("signedTx" to result.signedTx)
@@ -211,7 +214,7 @@ class ChainberryTrustWalletCoreModule : Module() {
 
     try {
       val metadata = NativeWalletStore.loadMetadata(context).toMutableMap()
-      metadata[walletId] = addresses
+      metadata[walletId] = NativeWalletStore.WalletRecord(isTestnet, addresses)
       NativeWalletStore.saveMetadata(context, metadata)
     } catch (e: Exception) {
       // The mnemonic/key is already persisted but has no metadata pointer — compensate by
@@ -222,6 +225,6 @@ class ChainberryTrustWalletCoreModule : Module() {
       throw e
     }
 
-    return mapOf("walletId" to walletId, "addresses" to addresses)
+    return mapOf("walletId" to walletId, "addresses" to addresses, "isTestnet" to isTestnet)
   }
 }
