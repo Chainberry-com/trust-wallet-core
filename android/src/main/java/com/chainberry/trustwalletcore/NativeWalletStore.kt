@@ -80,8 +80,7 @@ enum class AuthMode(val aliasInfix: String) {
  * Extends `CodedException` directly (rather than a flat `Exception`) so `.code` survives the
  * Expo bridge losslessly with no extra wrapping step.
  */
-sealed class NativeWalletStoreError private constructor(code: String, message: String, cause: Throwable? = null) :
-  CodedException(code, message, cause) {
+sealed class NativeWalletStoreError private constructor(code: String, message: String, cause: Throwable? = null) : CodedException(code, message, cause) {
 
   class NotFound(walletId: String) :
     NativeWalletStoreError("ERR_WALLET_NOT_FOUND", "Wallet not found: $walletId")

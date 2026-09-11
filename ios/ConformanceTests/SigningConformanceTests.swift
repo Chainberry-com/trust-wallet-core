@@ -43,13 +43,10 @@ class SigningConformanceTests: XCTestCase {
   }
 
   private func loadFixture() throws -> FixtureFile {
-    let thisFile = URL(fileURLWithPath: #filePath)
-    let url = thisFile
-      .deletingLastPathComponent()
-      .deletingLastPathComponent()
-      .deletingLastPathComponent()
-      .appendingPathComponent("conformance/signing-vectors.json")
-      .standardizedFileURL
+    guard let url = Bundle(for: SigningConformanceTests.self)
+      .url(forResource: "signing-vectors", withExtension: "json") else {
+      throw XCTSkip("signing-vectors.json not found in test bundle")
+    }
     return try JSONDecoder().decode(FixtureFile.self, from: Data(contentsOf: url))
   }
 

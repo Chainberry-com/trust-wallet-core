@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, audit]
+    branches: [main, audit, amarPolish]
   pull_request:
-    branches: [main, audit]
+    branches: [main]
 
 # This module has no standalone Gradle wrapper or Xcode project of its own — it's an Expo
 # native library, meant to be autolinked into a host app. The Android jobs below solve that
@@ -14,17 +14,68 @@ on:
 # project instead of failing to configure at all. The generated Gradle project name is
 # `:chainberry-trust-wallet-core` (derived from package.json's `@chainberry/trust-wallet-core`).
 #
-#   - TypeScript:  type-check the JS API surface (no native deps needed)
-#   - iOS:         pod spec lint --quick (structural podspec check, no TrustWalletCore
-#                  download) — a real Xcode build/test still needs the parent app
-#                  (mobile-vault) or a wired-up XCTest target, see README.md's iOS gap note
-#   - Android:     real Gradle build against the pinned wallet-core 4.1.19, via example/
-#                  - unit tests (JVM, fast): AmountParsingConformanceTest, Bech32Test,
-#                    NativeWalletStoreTest
-#                  - instrumented tests (emulator): AddressDerivationConformanceTest,
-#                    SigningConformanceTest — the actual cross-chain conformance gate
+#   - eslint:                   ESLint + @typescript-eslint on src/
+#   - swiftlint:                SwiftLint on ios/ (.swiftlint.yml)
+#   - android-lint:             ktlint on android/src/ (.editorconfig)
+#   - typescript:               tsc --noEmit type-check on src/index.ts
+#   - ios-podspec-lint:         pod spec lint --quick (structural, no TrustWalletCore download)
+#   - ios-conformance-tests:    xcodebuild test via CocoaPods test_spec (iPhone 16 sim)
+#   - android-unit-tests:       JVM: AmountParsingConformanceTest, Bech32Test, NativeWalletStoreTest
+#   - android-instrumented-tests: emulator: AddressDerivationConformanceTest, SigningConformanceTest
 
 jobs:
+  eslint:
+    name: ESLint (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install && npm install --save-dev eslint @typescript-eslint/parser @typescript-eslint/eslint-plugin
+      - name: ESLint
+        run: npx eslint src/ --ext .ts,.tsx --max-warnings 0
+
+  swiftlint:
+    name: SwiftLint (iOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SwiftLint
+        run: brew install swiftlint
+      - name: SwiftLint
+        run: swiftlint lint --strict ios/
+
+  android-lint:
+    name: ktlint (Android)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Install example/ dependencies
+        working-directory: example
+        run: npm install
+      - name: expo prebuild --platform android
+        working-directory: example
+        run: npx expo prebuild --platform android --no-install
+      - name: ktlint
+        working-directory: example/android
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          curl -sSLO https://github.com/pinterest/ktlint/releases/download/1.3.1/ktlint
+          chmod +x ktlint
+          ./ktlint --editorconfig=../../.editorconfig \
+            '../../android/src/**/*.kt' \
+            --reporter=plain \
+            --relative
+
   typescript:
     name: TypeScript type check
     runs-on: ubuntu-latest
@@ -49,6 +100,43 @@ jobs:
             --allow-warnings \
             --skip-import-validation \
             --quick
+
+  ios-conformance-tests:
+    name: iOS conformance tests (address/signing)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install example/ dependencies
+        working-directory: example
+        run: npm install
+      - name: expo prebuild --platform ios
+        working-directory: example
+        run: npx expo prebuild --platform ios --no-install
+      - name: pod install
+        working-directory: example/ios
+        run: |
+          LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 pod install
+      - name: xcodebuild test — iOS conformance suite
+        working-directory: example/ios
+        run: |
+          SCHEME=$(xcodebuild -workspace *.xcworkspace -list 2>/dev/null \
+            | grep 'ChainberryTrustWalletCoreModule-ConformanceTests' | head -1 | xargs)
+          xcodebuild test \
+            -workspace *.xcworkspace \
+            -scheme "$SCHEME" \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            -resultBundlePath "$RUNNER_TEMP/ios-conformance.xcresult" \
+            | xcpretty --report junit --output "$RUNNER_TEMP/ios-conformance-junit.xml"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-conformance-test-results
+          path: ${{ runner.temp }}/ios-conformance.xcresult
+          retention-days: 7
 
   android-unit-tests:
     name: Android unit tests (JVM)

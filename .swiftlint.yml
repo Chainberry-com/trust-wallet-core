@@ -1,0 +1,17 @@
+disabled_rules:
+  - trailing_comma
+  - line_length
+  - file_length
+  - function_body_length
+  - type_body_length
+  - cyclomatic_complexity
+  - identifier_name          # to, s, v, b, i, ix, tx, type_ su legitiman Swift/crypto stil
+  - for_where                # if-inside-for is clearer in some cases than the for-where compound
+  - redundant_void_return    # -> Void u closure tipovima je eksplicitno dokumentacijski
+  - implicit_optional_initialization  # var foo: Foo? = nil je namjerno eksplicitno
+
+excluded:
+  - ios/build
+  - ios/Pods
+  - ios/ConformanceTests
+  - example

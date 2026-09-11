@@ -7,8 +7,8 @@ import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
 import wallet.core.jni.HDWallet
 import java.util.UUID
 import kotlin.coroutines.resume
@@ -175,8 +175,8 @@ class ChainberryTrustWalletCoreModule : Module() {
     }
   }
 
-  /// Shows a native AlertDialog with decoded tx details before biometric auth fires.
-  /// The user must tap "Confirm & Sign" — cancelling throws UserCancelled.
+  // Shows a native AlertDialog with decoded tx details before biometric auth fires.
+  // The user must tap "Confirm & Sign" — cancelling throws UserCancelled.
   private suspend fun confirmTransaction(chain: ChainKey, unsignedTx: Map<String, Any>) {
     val message = ChainSigner.buildSummary(chain, unsignedTx)
     suspendCancellableCoroutine<Unit> { continuation ->

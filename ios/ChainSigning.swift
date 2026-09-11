@@ -779,21 +779,23 @@ enum ChainSigner {
           }
         }
       }
-      if let txID = unsignedTx["txID"] as? String {
-        // Verify txID == SHA256(raw_data_hex) to detect a mismatched digest.
-        if let rawHex = unsignedTx["raw_data_hex"] as? String,
-           let rawBytes = hexData(rawHex) {
-          let computed = Hash.sha256(data: rawBytes)
-          let computedHex = computed.map { String(format: "%02x", $0) }.joined()
-          guard computedHex.lowercased() == txID.lowercased() else {
-            throw Exception(name: "TxIntegrityFailed",
-              description: "TRX txID does not match SHA256(raw_data_hex) — signing refused")
-          }
-          lines.append("TxID verified ✓")
-        } else {
-          lines.append("TxID: \(txID.prefix(16))… (raw_data_hex absent — unverified)")
-        }
+      // Verify txID == SHA256(raw_data_hex). raw_data_hex must be present — fail closed if absent
+      // so a JS caller cannot suppress the integrity check by omitting the field.
+      guard let txID = unsignedTx["txID"] as? String else {
+        throw Exception(name: "TxIntegrityFailed", description: "TRX txID missing — signing refused")
       }
+      guard let rawHex = unsignedTx["raw_data_hex"] as? String,
+            let rawBytes = hexData(rawHex) else {
+        throw Exception(name: "TxIntegrityFailed",
+          description: "TRX raw_data_hex missing — cannot verify txID, signing refused")
+      }
+      let computed = Hash.sha256(data: rawBytes)
+      let computedHex = computed.map { String(format: "%02x", $0) }.joined()
+      guard computedHex.lowercased() == txID.lowercased() else {
+        throw Exception(name: "TxIntegrityFailed",
+          description: "TRX txID does not match SHA256(raw_data_hex) — signing refused")
+      }
+      lines.append("TxID verified ✓")
 
     case .solana:
       // Decode the pre-built tx to extract recipient and lamports (SOL) or destination and
@@ -812,14 +814,26 @@ enum ChainSigner {
       }
 
     case .bitcoincash:
-      if let descriptorJson = unsignedTx["unsignedDescriptorJson"] as? String,
-         let data = descriptorJson.data(using: .utf8),
-         let descriptor = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-        if let to = descriptor["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
-        if let sats = (descriptor["sendAmountSats"] as? NSNumber)?.int64Value {
-          lines.append("Amount: \(fmtAmt(Double(sats) / 1e8)) BCH")
-        }
+      // Fail closed — if descriptor is absent or unparseable we cannot show what will be signed.
+      guard let descriptorJson = unsignedTx["unsignedDescriptorJson"] as? String,
+            let data = descriptorJson.data(using: .utf8),
+            let descriptor = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        throw Exception(name: "UndecodableTx",
+          description: "Cannot decode BCH descriptor — signing refused to prevent blind signing")
       }
+      if let to = descriptor["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+      if let sats = (descriptor["sendAmountSats"] as? NSNumber)?.int64Value {
+        lines.append("Amount: \(fmtAmt(Double(sats) / 1e8)) BCH")
+      }
+      if let change = descriptor["changeAddress"] as? String { lines.append("Change to: \(fmtAddr(change))") }
+      if let spb = (descriptor["satsPerByte"] as? NSNumber)?.intValue { lines.append("Fee rate: \(spb) sat/vB") }
+      let bchInputs = (descriptor["inputs"] as? [[String: Any]])?
+        .compactMap { ($0["amountSats"] as? NSNumber)?.int64Value }
+        .reduce(Int64(0), +) ?? 0
+      let bchSend = (descriptor["sendAmountSats"] as? NSNumber)?.int64Value ?? 0
+      let bchChange = (descriptor["changeAmountSats"] as? NSNumber)?.int64Value ?? 0
+      let bchFee = bchInputs - bchSend - bchChange
+      if bchFee > 0 { lines.append("Total fee: \(fmtAmt(Double(bchFee) / 1e8)) BCH") }
 
     case .cosmos:
       if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
