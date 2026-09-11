@@ -19,12 +19,14 @@ public class ChainberryTrustWalletCoreModule: Module {
       NativeWalletStore.reconcileOrphans()
     }
 
-    // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses }.
+    // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses, isTestnet }.
     // No BIP-39 passphrase support: signTransaction always reconstructs the wallet with an
     // empty passphrase, so accepting one here would derive addresses from a seed different
     // from the one actually used to sign — always pass "" to stay consistent with that.
     // isTestnet selects the address format for BTC/LTC/BCH (see ChainSigner.address(for:)) —
-    // every other chain's address is the same on mainnet and testnet.
+    // every other chain's address is the same on mainnet and testnet. This value is persisted
+    // as immutable per-wallet metadata (NativeWalletStore.WalletRecord) — signTransaction reads
+    // it back from there instead of accepting it as a parameter, so it can never drift.
     AsyncFunction("createWallet") { (strength: Int, isTestnet: Bool) throws -> [String: Any] in
       guard let wallet = HDWallet(strength: Int32(strength), passphrase: "") else {
         throw Exception(name: "WalletError", description: "Failed to generate wallet")
@@ -37,7 +39,7 @@ public class ChainberryTrustWalletCoreModule: Module {
     }
 
     // One-time mnemonic exposure from JS, at import only — never retained after this call.
-    // Returns { walletId, addresses }. No BIP-39 passphrase support (see `createWallet`).
+    // Returns { walletId, addresses, isTestnet }. No BIP-39 passphrase support (see `createWallet`).
     AsyncFunction("importWallet") { (mnemonic: String, isTestnet: Bool) throws -> [String: Any] in
       guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: "") else {
         throw Exception(name: "InvalidMnemonic", description: "Invalid mnemonic phrase")
@@ -52,8 +54,8 @@ public class ChainberryTrustWalletCoreModule: Module {
     // Reads only the ungated metadata store — no biometric prompt.
     AsyncFunction("listWallets") { () throws -> [[String: Any]] in
       do {
-        return try NativeWalletStore.loadMetadata().map { walletId, addresses in
-          ["walletId": walletId, "addresses": addresses]
+        return try NativeWalletStore.loadMetadata().map { walletId, record in
+          ["walletId": walletId, "addresses": record.addresses, "isTestnet": record.isTestnet]
         }
       } catch let e as NativeWalletStoreError {
         throw e.asException
@@ -86,9 +88,11 @@ public class ChainberryTrustWalletCoreModule: Module {
     }
 
     // Triggers the native biometry/passcode prompt, then signs entirely in-process.
-    // Returns { signedTx, meta? }. isTestnet must match whatever `createWallet`/`importWallet`
-    // used — see ChainSigner.key(for:) (a mismatch signs with the wrong key for BTC/LTC).
-    AsyncFunction("signTransaction") { (walletId: String, chain: String, unsignedTx: [String: Any], isTestnet: Bool) async throws -> [String: Any] in
+    // Returns { signedTx, meta? }. Network mode (mainnet/testnet) is read from the wallet's own
+    // persisted record, not accepted as a parameter — see ChainSigner.key(for:) and
+    // NativeWalletStore.WalletRecord for why a caller-supplied value here could sign with the
+    // wrong key for BTC/LTC.
+    AsyncFunction("signTransaction") { (walletId: String, chain: String, unsignedTx: [String: Any]) async throws -> [String: Any] in
       do {
         let id = try NativeWalletStore.validateWalletId(walletId)
         let chainKey = try ChainKey(fromJs: chain)
@@ -102,18 +106,20 @@ public class ChainberryTrustWalletCoreModule: Module {
         // (e.g. chains added after the wallet was created). Runs silently after the
         // biometric gate — no extra prompt needed.
         var metadata = try NativeWalletStore.loadMetadata()
-        if var storedAddresses = metadata[id] {
-          var changed = false
-          for chain in ChainKey.allCases {
-            if storedAddresses[chain.rawValue] == nil {
-              storedAddresses[chain.rawValue] = ChainSigner.address(for: chain, wallet: wallet, isTestnet: isTestnet)
-              changed = true
-            }
+        guard var record = metadata[id] else {
+          throw NativeWalletStoreError.notFound(walletId: id)
+        }
+        let isTestnet = record.isTestnet
+        var changed = false
+        for chain in ChainKey.allCases {
+          if record.addresses[chain.rawValue] == nil {
+            record.addresses[chain.rawValue] = ChainSigner.address(for: chain, wallet: wallet, isTestnet: isTestnet)
+            changed = true
           }
-          if changed {
-            metadata[id] = storedAddresses
-            try? NativeWalletStore.saveMetadata(metadata)
-          }
+        }
+        if changed {
+          metadata[id] = record
+          try? NativeWalletStore.saveMetadata(metadata)
         }
         let result = try ChainSigner.sign(chain: chainKey, wallet: wallet, unsignedTx: unsignedTx, isTestnet: isTestnet)
         var response: [String: Any] = ["signedTx": result.signedTx]
@@ -248,7 +254,7 @@ public class ChainberryTrustWalletCoreModule: Module {
     try NativeWalletStore.saveMnemonic(wallet.mnemonic, walletId: walletId)
     do {
       var metadata = try NativeWalletStore.loadMetadata()
-      metadata[walletId] = addresses
+      metadata[walletId] = NativeWalletStore.WalletRecord(isTestnet: isTestnet, addresses: addresses)
       try NativeWalletStore.saveMetadata(metadata)
     } catch {
       // The mnemonic is already persisted but has no metadata pointer — compensate by
@@ -259,7 +265,7 @@ public class ChainberryTrustWalletCoreModule: Module {
       throw error
     }
 
-    return ["walletId": walletId, "addresses": addresses]
+    return ["walletId": walletId, "addresses": addresses, "isTestnet": isTestnet]
   }
 
   /// Prompts biometry-or-device-passcode via `.deviceOwnerAuthentication` (Apple's

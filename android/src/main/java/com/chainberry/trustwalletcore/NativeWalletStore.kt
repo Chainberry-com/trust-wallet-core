@@ -541,17 +541,27 @@ object NativeWalletStore {
     }
   }
 
-  // MARK: - Metadata (ungated: walletId -> { chain: address })
+  // MARK: - Metadata (ungated: walletId -> { isTestnet, addresses: { chain: address } })
+
+  /** A wallet's network mode is fixed at creation time ([ChainberryTrustWalletCoreModule
+   * .persistNewWallet]) and never changes thereafter — [isTestnet] is the authoritative value
+   * `signTransaction` must derive/sign with, replacing the old pattern of accepting it fresh as
+   * a parameter on every call (see docs/adr and the security remediation this type was
+   * introduced for). */
+  data class WalletRecord(val isTestnet: Boolean, val addresses: Map<String, String>)
 
   /** Atomically replaces [target] via a temp-file write + `File.renameTo` (an atomic
    * `rename(2)` on the same filesystem/mount, since the temp file is created alongside
    * [target] in the same directory) — never a direct in-place overwrite, which could leave a
    * torn file if the process is killed mid-write. Pure/`File`-based so it's unit-testable on
    * the plain JVM without an Android `Context`. */
-  internal fun saveMetadataToFile(target: File, wallets: Map<String, Map<String, String>>) {
+  internal fun saveMetadataToFile(target: File, wallets: Map<String, WalletRecord>) {
     val root = JSONObject()
-    for ((walletId, addresses) in wallets) {
-      root.put(walletId, JSONObject(addresses as Map<*, *>))
+    for ((walletId, record) in wallets) {
+      val entry = JSONObject()
+      entry.put("isTestnet", record.isTestnet)
+      entry.put("addresses", JSONObject(record.addresses as Map<*, *>))
+      root.put(walletId, entry)
     }
     val temp = File(target.parentFile, "$METADATA_FILE.tmp-${System.nanoTime()}")
     try {
@@ -568,32 +578,41 @@ object NativeWalletStore {
 
   /** Distinguishes "no metadata has ever been written" (legitimately empty) from a genuine
    * parse/corruption failure, which now throws a typed [NativeWalletStoreError.Corrupted]
-   * instead of letting a raw, uncaught `JSONException` leak through the Expo bridge.
-   * Pure/`File`-based so it's unit-testable on the plain JVM without an Android `Context`. */
-  internal fun loadMetadataFromFile(file: File): Map<String, Map<String, String>> {
+   * instead of letting a raw, uncaught `JSONException`/[org.json.JSONException] leak through
+   * the Expo bridge. A record missing `isTestnet` or `addresses` (e.g. data written by a
+   * pre-migration build under the old flat schema) is treated the same way — corrupted, not
+   * silently reinterpreted — there is no legacy-shape fallback. Pure/`File`-based so it's
+   * unit-testable on the plain JVM without an Android `Context`. */
+  internal fun loadMetadataFromFile(file: File): Map<String, WalletRecord> {
     if (!file.exists()) return emptyMap()
     val root = try {
       JSONObject(file.readText())
     } catch (e: JSONException) {
       throw NativeWalletStoreError.Corrupted("metadata.json is not valid JSON", e)
     }
-    val result = mutableMapOf<String, Map<String, String>>()
-    for (walletId in root.keys()) {
-      val addressesJson = root.getJSONObject(walletId)
-      val addresses = mutableMapOf<String, String>()
-      for (chain in addressesJson.keys()) {
-        addresses[chain] = addressesJson.getString(chain)
+    val result = mutableMapOf<String, WalletRecord>()
+    try {
+      for (walletId in root.keys()) {
+        val entry = root.getJSONObject(walletId)
+        val isTestnet = entry.getBoolean("isTestnet")
+        val addressesJson = entry.getJSONObject("addresses")
+        val addresses = mutableMapOf<String, String>()
+        for (chain in addressesJson.keys()) {
+          addresses[chain] = addressesJson.getString(chain)
+        }
+        result[walletId] = WalletRecord(isTestnet, addresses)
       }
-      result[walletId] = addresses
+    } catch (e: JSONException) {
+      throw NativeWalletStoreError.Corrupted("metadata.json entry has an unexpected shape", e)
     }
     return result
   }
 
-  fun saveMetadata(context: Context, wallets: Map<String, Map<String, String>>) {
+  fun saveMetadata(context: Context, wallets: Map<String, WalletRecord>) {
     saveMetadataToFile(metadataFile(context), wallets)
   }
 
-  fun loadMetadata(context: Context): Map<String, Map<String, String>> {
+  fun loadMetadata(context: Context): Map<String, WalletRecord> {
     return loadMetadataFromFile(metadataFile(context))
   }
 
