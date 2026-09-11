@@ -12,7 +12,7 @@ trim_trailing_whitespace = true
 indent_size = 2
 max_line_length = 500
 
-# Isključena opinionated formatirna pravila koja ne dotiču ispravnost koda.
+# Disabled opinionated formatting rules that do not affect code correctness.
 ktlint_standard_multiline-expression-wrapping = disabled
 ktlint_standard_chain-method-continuation = disabled
 ktlint_standard_class-signature = disabled
@@ -30,9 +30,8 @@ ktlint_standard_multiline-if-else = disabled
 ktlint_standard_if-else-bracing = disabled
 ktlint_standard_spacing-between-declarations-with-annotations = disabled
 ktlint_standard_spacing-between-declarations-with-comments = disabled
-# Opinionated rules s previše false-positive u kripto/Expo kodu:
-# function-signature (170 lokacija): ktlint hoće svaki parametar u posebnu liniju
-# — čisto formatiranje, nula uticaja na ispravnost koda. Jedini legitimni disable.
+# function-signature (170 sites): ktlint wants every parameter on its own line —
+# pure formatting churn, zero correctness impact. Only justified disable here.
 ktlint_standard_function-signature = disabled
 [*.gradle]
 indent_size = 4

@@ -6,7 +6,7 @@ disabled_rules:
   - type_body_length
   - cyclomatic_complexity
   - identifier_name          # to, s, v, b, i, ix, tx, type_ su legitiman Swift/crypto stil
-  - for_where                # if-inside-for je jasniji u nekim slučajevima
+  - for_where                # if-inside-for is clearer in some cases than the for-where compound
   - redundant_void_return    # -> Void u closure tipovima je eksplicitno dokumentacijski
   - implicit_optional_initialization  # var foo: Foo? = nil je namjerno eksplicitno
 
