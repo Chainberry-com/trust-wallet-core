@@ -24,6 +24,34 @@ GitHub Packages auth is still needed (via `GITHUB_ACTOR`/`GITHUB_TOKEN` env vars
 
 Android biometric gating additionally pulls in `androidx.biometric:biometric:1.1.0`.
 
+## Publish
+
+This package is consumed by the app via `file:modules/trust-wallet-core` (see the root
+`package.json`), not an npm workspace under `packages/*` — so, unlike
+`@chainberry/expo-wallet-sdk`, there's no `-w` flag to use; run these from inside this directory.
+There's also no build step: this package ships its TypeScript source directly (`main`/`types`
+point at `src/index.ts`), so no `prepublishOnly` rebuild happens either.
+
+1. Bump the version (in `package.json`, or via):
+   ```sh
+   cd modules/trust-wallet-core
+   npm version patch   # or minor / major
+   ```
+2. Dry-run first — prints exactly what would be published without touching the registry:
+   ```sh
+   npm publish --dry-run
+   ```
+3. Publish for real:
+   ```sh
+   npm publish
+   ```
+   `publishConfig.access: "public"` in this package's own `package.json` already covers the
+   `--access public` flag scoped packages otherwise need.
+
+Requires npm registry publish auth (an `_authToken` for `@chainberry`, e.g. via `.npmrc` — not
+committed to git). This is separate from the GitHub Packages auth mentioned above, which is only
+needed for bumping the pinned Android wallet-core artifact, not for publishing this npm package.
+
 ## Usage
 
 ```ts
