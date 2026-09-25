@@ -113,7 +113,7 @@ public class ChainberryTrustWalletCoreModule: Module {
         var changed = false
         for chain in ChainKey.allCases {
           if record.addresses[chain.rawValue] == nil {
-            record.addresses[chain.rawValue] = ChainSigner.address(for: chain, wallet: wallet, isTestnet: isTestnet)
+            record.addresses[chain.rawValue] = try ChainSigner.address(for: chain, wallet: wallet, isTestnet: isTestnet)
             changed = true
           }
         }
@@ -248,7 +248,7 @@ public class ChainberryTrustWalletCoreModule: Module {
     let walletId = UUID().uuidString
     var addresses: [String: String] = [:]
     for chain in ChainKey.allCases {
-      addresses[chain.rawValue] = ChainSigner.address(for: chain, wallet: wallet, isTestnet: isTestnet)
+      addresses[chain.rawValue] = try ChainSigner.address(for: chain, wallet: wallet, isTestnet: isTestnet)
     }
 
     try NativeWalletStore.saveMnemonic(wallet.mnemonic, walletId: walletId)
