@@ -13,6 +13,7 @@ enum ChainKey: String, CaseIterable {
   case cosmos
   case aptos
   case tezos
+  case sui
 
   init(fromJs raw: String) throws {
     guard let key = ChainKey(rawValue: raw) else {
@@ -42,6 +43,7 @@ enum ChainKey: String, CaseIterable {
     case .cosmos:   return "ATOM"
     case .aptos:    return "APT"
     case .tezos:    return "XTZ"
+    case .sui:      return "SUI"
     }
   }
 
@@ -61,6 +63,7 @@ enum ChainKey: String, CaseIterable {
     case .cosmos: return .cosmos
     case .aptos: return .aptos
     case .tezos: return .tezos
+    case .sui:   return .sui
     }
   }
 }
@@ -162,6 +165,8 @@ enum ChainSigner {
       return Result(signedTx: try signAptos(wallet: wallet, txParams: unsignedTx), meta: nil)
     case .tezos:
       return Result(signedTx: try signTezos(wallet: wallet, txParams: unsignedTx), meta: nil)
+    case .sui:
+      return Result(signedTx: try signSui(wallet: wallet, txParams: unsignedTx), meta: nil)
     }
   }
 
@@ -678,6 +683,61 @@ enum ChainSigner {
 
   // MARK: - Transaction summary for native confirmation UI
 
+  // MARK: - Sui (SUI)
+  // txParams: { inputCoins: [{objectId, version, digest}], recipient, amount (MIST string),
+  //             gasBudget (MIST string), referenceGasPrice (string) }
+  // Returns JSON string: { "unsignedTx": "<base64>", "signature": "<base64>" }
+  private static func signSui(wallet: HDWallet, txParams: [String: Any]) throws -> String {
+    guard let coinsRaw = txParams["inputCoins"] as? [[String: Any]],
+          let recipient = txParams["recipient"] as? String,
+          let amountStr = txParams["amount"] as? String,
+          let gasBudgetStr = txParams["gasBudget"] as? String,
+          let refGasPriceStr = txParams["referenceGasPrice"] as? String else {
+      throw Exception(name: "InvalidParams", description: "Missing required Sui tx params")
+    }
+    guard let amountMist = UInt64(amountStr),
+          let gasBudget = UInt64(gasBudgetStr),
+          let refGasPrice = UInt64(refGasPriceStr) else {
+      throw Exception(name: "InvalidParams", description: "Invalid Sui numeric params")
+    }
+
+    let privateKey = wallet.getKeyForCoin(coin: .sui)
+
+    var inputCoins: [TW_Sui_Proto_ObjectRef] = []
+    for c in coinsRaw {
+      guard let objectId = c["objectId"] as? String,
+            let versionNum = c["version"] as? NSNumber,
+            let digest = c["digest"] as? String else {
+        throw Exception(name: "InvalidParams", description: "Invalid Sui coin object")
+      }
+      var ref = TW_Sui_Proto_ObjectRef()
+      ref.objectID = objectId
+      ref.version = versionNum.uint64Value
+      ref.objectDigest = digest
+      inputCoins.append(ref)
+    }
+
+    var paySui = TW_Sui_Proto_PaySui()
+    paySui.inputCoins = inputCoins
+    paySui.recipients = [recipient]
+    paySui.amounts = [amountMist]
+
+    var input = TW_Sui_Proto_SigningInput()
+    input.paySui = paySui
+    input.gasBudget = gasBudget
+    input.referenceGasPrice = refGasPrice
+    input.privateKey = privateKey.data
+
+    let output: TW_Sui_Proto_SigningOutput = AnySigner.sign(input: input, coin: .sui)
+    guard output.error == .ok else {
+      throw Exception(name: "SigningFailed", description: output.errorMessage)
+    }
+
+    let result: [String: String] = ["unsignedTx": output.unsignedTx, "signature": output.signature]
+    let jsonData = try JSONSerialization.data(withJSONObject: result)
+    return String(data: jsonData, encoding: .utf8) ?? "{}"
+  }
+
   static func buildSummary(chain: ChainKey, unsignedTx: [String: Any]) -> String {
     var lines = ["Network: \(chain.rawValue.uppercased())"]
     switch chain {
@@ -766,6 +826,15 @@ enum ChainSigner {
       }
       if let reveal = unsignedTx["needsReveal"] as? Bool, reveal {
         lines.append("(includes reveal operation)")
+      }
+
+    case .sui:
+      if let to = unsignedTx["recipient"] as? String { lines.append("To: \(fmtAddr(to))") }
+      if let mistStr = unsignedTx["amount"] as? String, let mist = UInt64(mistStr) {
+        lines.append("Amount: \(fmtAmt(Double(mist) / 1e9)) SUI")
+      }
+      if let budgetStr = unsignedTx["gasBudget"] as? String, let budget = UInt64(budgetStr) {
+        lines.append("Max fee: \(fmtAmt(Double(budget) / 1e9)) SUI")
       }
     }
     return lines.joined(separator: "\n")
