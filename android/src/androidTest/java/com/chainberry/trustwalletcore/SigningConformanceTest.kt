@@ -125,7 +125,7 @@ class SigningConformanceTest {
     // methodology). "ton" is deliberately absent — signTon() embeds a wall-clock
     // `expireAt = now + 600s` into the signed payload, so its output is never byte-reproducible
     // across runs; see tonVectorIsWellFormed() below for what's actually checked instead.
-    val EXPECTED: Map<String, String> = mapOf(
+    val expectedOutputs: Map<String, String> = mapOf(
       "ethereum" to "0xf86c808504a817c800825208949858effd232b4033e47d90003d41ec34ecaeda94880de0b6b3a76400008026a0b7cca5f69561cd482cec4e692bd2da17d9eb1d6b3a83fe3f7f11d117de99ca97a00ad0dc153460e39b355c226a2744fc2926f84b95b89c954551571f1bbc251478",
       "polygon" to "0x02f874818980843b9aca008509502f9000825208949858effd232b4033e47d90003d41ec34ecaeda94880de0b6b3a764000080c001a038b5c72ee38aa18607462b80ab0cb170a8d4df1c4090ac49acd41d6b4b0f9acca05bdee390ee8a50ff569f55d408371213df72a3065902b07317289b39788cb434",
       "bitcoin" to "0100000000010100000000000000000000000000000000000000000000000000000000000000000000000000000000000250c3000000000000160014c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e2cebd000000000000160014c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e20247304402201e8f3663c97712bbf662c96df532e701ca9b660b507ab170d7b4ffbd966d4be0022033bd537c7720b1e7be2b7663d1a0adcbe565ff18a25794aec828015529ab80e101210330d54fd0dd420a6e5f8d3624f5f3482cae350f79d5f0753bf5beef9c2d91af3c00000000",
@@ -160,7 +160,7 @@ class SigningConformanceTest {
   fun signedOutputsMatch() {
     val wallet = HDWallet(MNEMONIC, "")
     for ((chain, pair) in vectors()) {
-      val expected = EXPECTED[chain] ?: continue
+      val expected = expectedOutputs[chain] ?: continue
       val (chainKey, unsignedTx) = pair
       val actual = ChainSigner.sign(chainKey, wallet, unsignedTx, isTestnet = false).signedTx
       assertEquals("signed output mismatch for chain=$chain", expected, actual)

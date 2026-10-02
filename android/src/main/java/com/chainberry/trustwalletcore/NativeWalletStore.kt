@@ -21,6 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
 import java.security.KeyStore
+import java.util.Collections
 import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -79,8 +80,7 @@ enum class AuthMode(val aliasInfix: String) {
  * Extends `CodedException` directly (rather than a flat `Exception`) so `.code` survives the
  * Expo bridge losslessly with no extra wrapping step.
  */
-sealed class NativeWalletStoreError private constructor(code: String, message: String, cause: Throwable? = null) :
-  CodedException(code, message, cause) {
+sealed class NativeWalletStoreError private constructor(code: String, message: String, cause: Throwable? = null) : CodedException(code, message, cause) {
 
   class NotFound(walletId: String) :
     NativeWalletStoreError("ERR_WALLET_NOT_FOUND", "Wallet not found: $walletId")
@@ -235,6 +235,22 @@ object NativeWalletStore {
    * which of these two aliases exists for it (see [resolveExistingMode]), with no separate
    * metadata field needed. */
   internal fun keyAlias(mode: AuthMode, walletId: String): String = KEY_ALIAS_PREFIX + mode.aliasInfix + walletId
+
+  /** Inverse of [keyAlias]: recovers `(mode, walletId)` from a raw Keystore alias string, or
+   * `null` if it doesn't match this module's alias scheme at all (some other feature's Keystore
+   * entry, sharing the same `AndroidKeyStore` provider). Checks the longer/specific infixes
+   * (`bio_`, `cred_`) before the empty [AuthMode.LEGACY_COMBINED] infix, which would otherwise
+   * match every alias under [KEY_ALIAS_PREFIX] — relies on [AuthMode.entries] iterating in
+   * declaration order, same assumption [resolveExistingMode] makes. Used by [reconcileOrphans]
+   * to identify which Keystore aliases belong to which wallet id, without needing a Context. */
+  internal fun parseKeyAlias(alias: String): Pair<AuthMode, String>? {
+    if (!alias.startsWith(KEY_ALIAS_PREFIX)) return null
+    for (mode in AuthMode.entries) {
+      val prefix = KEY_ALIAS_PREFIX + mode.aliasInfix
+      if (alias.startsWith(prefix)) return mode to alias.removePrefix(prefix)
+    }
+    return null
+  }
 
   private fun getOrCreateKey(walletId: String, mode: AuthMode): SecretKey {
     val alias = keyAlias(mode, walletId)
@@ -525,17 +541,27 @@ object NativeWalletStore {
     }
   }
 
-  // MARK: - Metadata (ungated: walletId -> { chain: address })
+  // MARK: - Metadata (ungated: walletId -> { isTestnet, addresses: { chain: address } })
+
+  /** A wallet's network mode is fixed at creation time ([ChainberryTrustWalletCoreModule
+   * .persistNewWallet]) and never changes thereafter — [isTestnet] is the authoritative value
+   * `signTransaction` must derive/sign with, replacing the old pattern of accepting it fresh as
+   * a parameter on every call (see docs/adr and the security remediation this type was
+   * introduced for). */
+  data class WalletRecord(val isTestnet: Boolean, val addresses: Map<String, String>)
 
   /** Atomically replaces [target] via a temp-file write + `File.renameTo` (an atomic
    * `rename(2)` on the same filesystem/mount, since the temp file is created alongside
    * [target] in the same directory) — never a direct in-place overwrite, which could leave a
    * torn file if the process is killed mid-write. Pure/`File`-based so it's unit-testable on
    * the plain JVM without an Android `Context`. */
-  internal fun saveMetadataToFile(target: File, wallets: Map<String, Map<String, String>>) {
+  internal fun saveMetadataToFile(target: File, wallets: Map<String, WalletRecord>) {
     val root = JSONObject()
-    for ((walletId, addresses) in wallets) {
-      root.put(walletId, JSONObject(addresses as Map<*, *>))
+    for ((walletId, record) in wallets) {
+      val entry = JSONObject()
+      entry.put("isTestnet", record.isTestnet)
+      entry.put("addresses", JSONObject(record.addresses as Map<*, *>))
+      root.put(walletId, entry)
     }
     val temp = File(target.parentFile, "$METADATA_FILE.tmp-${System.nanoTime()}")
     try {
@@ -552,33 +578,117 @@ object NativeWalletStore {
 
   /** Distinguishes "no metadata has ever been written" (legitimately empty) from a genuine
    * parse/corruption failure, which now throws a typed [NativeWalletStoreError.Corrupted]
-   * instead of letting a raw, uncaught `JSONException` leak through the Expo bridge.
-   * Pure/`File`-based so it's unit-testable on the plain JVM without an Android `Context`. */
-  internal fun loadMetadataFromFile(file: File): Map<String, Map<String, String>> {
+   * instead of letting a raw, uncaught `JSONException`/[org.json.JSONException] leak through
+   * the Expo bridge. A record missing `isTestnet` or `addresses` (e.g. data written by a
+   * pre-migration build under the old flat schema) is treated the same way — corrupted, not
+   * silently reinterpreted — there is no legacy-shape fallback. Pure/`File`-based so it's
+   * unit-testable on the plain JVM without an Android `Context`. */
+  internal fun loadMetadataFromFile(file: File): Map<String, WalletRecord> {
     if (!file.exists()) return emptyMap()
     val root = try {
       JSONObject(file.readText())
     } catch (e: JSONException) {
       throw NativeWalletStoreError.Corrupted("metadata.json is not valid JSON", e)
     }
-    val result = mutableMapOf<String, Map<String, String>>()
-    for (walletId in root.keys()) {
-      val addressesJson = root.getJSONObject(walletId)
-      val addresses = mutableMapOf<String, String>()
-      for (chain in addressesJson.keys()) {
-        addresses[chain] = addressesJson.getString(chain)
+    val result = mutableMapOf<String, WalletRecord>()
+    try {
+      for (walletId in root.keys()) {
+        val entry = root.getJSONObject(walletId)
+        val isTestnet = entry.getBoolean("isTestnet")
+        val addressesJson = entry.getJSONObject("addresses")
+        val addresses = mutableMapOf<String, String>()
+        for (chain in addressesJson.keys()) {
+          addresses[chain] = addressesJson.getString(chain)
+        }
+        result[walletId] = WalletRecord(isTestnet, addresses)
       }
-      result[walletId] = addresses
+    } catch (e: JSONException) {
+      throw NativeWalletStoreError.Corrupted("metadata.json entry has an unexpected shape", e)
     }
     return result
   }
 
-  fun saveMetadata(context: Context, wallets: Map<String, Map<String, String>>) {
+  fun saveMetadata(context: Context, wallets: Map<String, WalletRecord>) {
     saveMetadataToFile(metadataFile(context), wallets)
   }
 
-  fun loadMetadata(context: Context): Map<String, Map<String, String>> {
+  fun loadMetadata(context: Context): Map<String, WalletRecord> {
     return loadMetadataFromFile(metadataFile(context))
+  }
+
+  // MARK: - Reconciliation (see CONTEXT.md "orphan"/"reconciliation pass", docs/adr/0001)
+
+  /** Every `.enc` file in [walletsDir] whose wallet id has no entry in [liveIds] — the
+   * file-side half of an orphan. Pure/`File`-based so it's unit-testable on the plain JVM.
+   * Deliberately does not also match `METADATA_FILE` itself: that file has no `.enc` suffix. */
+  internal fun findOrphanFiles(walletsDir: File, liveIds: Set<String>): List<File> =
+    walletsDir.listFiles { f -> f.name.endsWith(".enc") }
+      ?.filter { it.name.removeSuffix(".enc") !in liveIds }
+      ?: emptyList()
+
+  /** Every leftover `metadata.json.tmp-*` file in [walletsDir] — pure litter from a
+   * [saveMetadataToFile] interrupted between writing the temp file and renaming it over the
+   * target (the rename itself is atomic, so the target is never at risk; only the temp file
+   * can be left behind). Not a security or correctness concern, just disk hygiene swept up
+   * alongside the real orphan checks since reconciliation is already scanning this directory. */
+  internal fun findStaleMetadataTempFiles(walletsDir: File): List<File> =
+    walletsDir.listFiles { f -> f.name.startsWith("$METADATA_FILE.tmp-") }?.toList() ?: emptyList()
+
+  /**
+   * Runs once at module init (see `TrustWalletCoreModule`'s `OnCreate`), before the JS layer can
+   * issue its first `createWallet`/`importWallet`/`deleteWallet` call — the actual source of
+   * crash-safety for an interrupted create or delete, not the in-call rollback in
+   * `persistNewWallet`. Android has *two* independently-persistable secret-side resources per
+   * wallet — the `.enc` file and its Keystore key alias, since [getOrCreateKey] creates the key
+   * before [saveMnemonic] ever writes the file — so both are checked against the metadata store
+   * independently, neither gated on the other's presence.
+   *
+   * Best-effort and never throws: any failure here is logged and skipped rather than propagated,
+   * since a broken reconciliation pass must never become "the app won't launch." A metadata entry
+   * with no matching secret-side resource (the reverse shape — a "zombie") is deliberately left
+   * untouched here; see [NativeWalletStoreError.NotFound] and docs/adr/0001 for why.
+   */
+  fun reconcileOrphans(context: Context) {
+    val liveIds = try {
+      loadMetadata(context).keys
+    } catch (e: Exception) {
+      Log.w(TAG, "reconciliation: failed to load metadata, skipping this pass entirely", e)
+      return
+    }
+
+    val dir = walletsDir(context)
+
+    try {
+      for (file in findOrphanFiles(dir, liveIds)) {
+        if (!file.delete()) {
+          Log.w(TAG, "reconciliation: failed to delete orphaned file ${file.name}")
+        }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "reconciliation: failed while cleaning up orphaned files", e)
+    }
+
+    try {
+      val ks = keyStore()
+      for (alias in Collections.list(ks.aliases())) {
+        val (_, walletId) = parseKeyAlias(alias) ?: continue
+        if (walletId !in liveIds) {
+          try {
+            ks.deleteEntry(alias)
+          } catch (e: Exception) {
+            Log.w(TAG, "reconciliation: failed to delete orphaned key alias $alias", e)
+          }
+        }
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "reconciliation: failed while enumerating Keystore aliases", e)
+    }
+
+    try {
+      findStaleMetadataTempFiles(dir).forEach { it.delete() }
+    } catch (e: Exception) {
+      Log.w(TAG, "reconciliation: failed while cleaning up stale metadata temp files", e)
+    }
   }
 
   // MARK: - Biometric/device-credential prompt

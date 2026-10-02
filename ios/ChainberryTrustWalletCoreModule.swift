@@ -10,12 +10,23 @@ public class ChainberryTrustWalletCoreModule: Module {
   public func definition() -> ModuleDefinition {
     Name("TrustWalletCore")
 
-    // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses }.
+    // Runs once, right after module init, before any of the AsyncFunctions below can be reached
+    // from JS — so nothing can legitimately be mid-operation yet, which is exactly what makes a
+    // one-shot pass here sufficient (no lock/grace-period needed against an in-flight call). This
+    // is the actual crash-safety mechanism for an interrupted create/delete; see CONTEXT.md and
+    // docs/adr/0001. `reconcileOrphans` is non-throwing — never allowed to block or crash startup.
+    OnCreate {
+      NativeWalletStore.reconcileOrphans()
+    }
+
+    // strength 128 = 12 words, 256 = 24 words. Returns { walletId, addresses, isTestnet }.
     // No BIP-39 passphrase support: signTransaction always reconstructs the wallet with an
     // empty passphrase, so accepting one here would derive addresses from a seed different
     // from the one actually used to sign — always pass "" to stay consistent with that.
     // isTestnet selects the address format for BTC/LTC/BCH (see ChainSigner.address(for:)) —
-    // every other chain's address is the same on mainnet and testnet.
+    // every other chain's address is the same on mainnet and testnet. This value is persisted
+    // as immutable per-wallet metadata (NativeWalletStore.WalletRecord) — signTransaction reads
+    // it back from there instead of accepting it as a parameter, so it can never drift.
     AsyncFunction("createWallet") { (strength: Int, isTestnet: Bool) throws -> [String: Any] in
       guard let wallet = HDWallet(strength: Int32(strength), passphrase: "") else {
         throw Exception(name: "WalletError", description: "Failed to generate wallet")
@@ -28,7 +39,7 @@ public class ChainberryTrustWalletCoreModule: Module {
     }
 
     // One-time mnemonic exposure from JS, at import only — never retained after this call.
-    // Returns { walletId, addresses }. No BIP-39 passphrase support (see `createWallet`).
+    // Returns { walletId, addresses, isTestnet }. No BIP-39 passphrase support (see `createWallet`).
     AsyncFunction("importWallet") { (mnemonic: String, isTestnet: Bool) throws -> [String: Any] in
       guard let wallet = HDWallet(mnemonic: mnemonic, passphrase: "") else {
         throw Exception(name: "InvalidMnemonic", description: "Invalid mnemonic phrase")
@@ -43,8 +54,8 @@ public class ChainberryTrustWalletCoreModule: Module {
     // Reads only the ungated metadata store — no biometric prompt.
     AsyncFunction("listWallets") { () throws -> [[String: Any]] in
       do {
-        return try NativeWalletStore.loadMetadata().map { walletId, addresses in
-          ["walletId": walletId, "addresses": addresses]
+        return try NativeWalletStore.loadMetadata().map { walletId, record in
+          ["walletId": walletId, "addresses": record.addresses, "isTestnet": record.isTestnet]
         }
       } catch let e as NativeWalletStoreError {
         throw e.asException
@@ -55,23 +66,33 @@ public class ChainberryTrustWalletCoreModule: Module {
     // deleted, same gate as `signTransaction`/`exportMnemonic`. A compromised/malicious JS
     // caller can still invoke this directly (there's no UI call site today), so the gate
     // must live here rather than in JS.
+    //
+    // Removes the metadata entry *before* the secret (Keychain item) — the reverse of the old
+    // ordering. If this is interrupted between the two steps, the wallet is already gone from
+    // `listWallets` and only an orphaned Keychain item is left behind, which the next app
+    // launch's reconciliation pass cleans up (see docs/adr/0001) — never a metadata record still
+    // pointing at a secret that's already gone.
     AsyncFunction("deleteWallet") { (walletId: String) async throws -> Void in
-      do {
-        let id = try NativeWalletStore.validateWalletId(walletId)
-        _ = try await Self.authenticatedContext(reason: "Delete wallet")
-        try NativeWalletStore.deleteMnemonic(walletId: id)
-        var metadata = try NativeWalletStore.loadMetadata()
-        metadata.removeValue(forKey: id)
-        try NativeWalletStore.saveMetadata(metadata)
-      } catch let e as NativeWalletStoreError {
-        throw e.asException
+      try await Self.withLifecycleLock(rejectIfBusy: false) {
+        do {
+          let id = try NativeWalletStore.validateWalletId(walletId)
+          _ = try await Self.authenticatedContext(reason: "Delete wallet")
+          var metadata = try NativeWalletStore.loadMetadata()
+          metadata.removeValue(forKey: id)
+          try NativeWalletStore.saveMetadata(metadata)
+          try NativeWalletStore.deleteMnemonic(walletId: id)
+        } catch let e as NativeWalletStoreError {
+          throw e.asException
+        }
       }
     }
 
     // Triggers the native biometry/passcode prompt, then signs entirely in-process.
-    // Returns { signedTx, meta? }. isTestnet must match whatever `createWallet`/`importWallet`
-    // used — see ChainSigner.key(for:) (a mismatch signs with the wrong key for BTC/LTC).
-    AsyncFunction("signTransaction") { (walletId: String, chain: String, unsignedTx: [String: Any], isTestnet: Bool) async throws -> [String: Any] in
+    // Returns { signedTx, meta? }. Network mode (mainnet/testnet) is read from the wallet's own
+    // persisted record, not accepted as a parameter — see ChainSigner.key(for:) and
+    // NativeWalletStore.WalletRecord for why a caller-supplied value here could sign with the
+    // wrong key for BTC/LTC.
+    AsyncFunction("signTransaction") { (walletId: String, chain: String, unsignedTx: [String: Any]) async throws -> [String: Any] in
       do {
         let id = try NativeWalletStore.validateWalletId(walletId)
         let chainKey = try ChainKey(fromJs: chain)
@@ -85,18 +106,20 @@ public class ChainberryTrustWalletCoreModule: Module {
         // (e.g. chains added after the wallet was created). Runs silently after the
         // biometric gate — no extra prompt needed.
         var metadata = try NativeWalletStore.loadMetadata()
-        if var storedAddresses = metadata[id] {
-          var changed = false
-          for chain in ChainKey.allCases {
-            if storedAddresses[chain.rawValue] == nil {
-              storedAddresses[chain.rawValue] = ChainSigner.address(for: chain, wallet: wallet, isTestnet: isTestnet)
-              changed = true
-            }
+        guard var record = metadata[id] else {
+          throw NativeWalletStoreError.notFound(walletId: id)
+        }
+        let isTestnet = record.isTestnet
+        var changed = false
+        for chain in ChainKey.allCases {
+          if record.addresses[chain.rawValue] == nil {
+            record.addresses[chain.rawValue] = ChainSigner.address(for: chain, wallet: wallet, isTestnet: isTestnet)
+            changed = true
           }
-          if changed {
-            metadata[id] = storedAddresses
-            try? NativeWalletStore.saveMetadata(metadata)
-          }
+        }
+        if changed {
+          metadata[id] = record
+          try? NativeWalletStore.saveMetadata(metadata)
         }
         let result = try ChainSigner.sign(chain: chainKey, wallet: wallet, unsignedTx: unsignedTx, isTestnet: isTestnet)
         var response: [String: Any] = ["signedTx": result.signedTx]
@@ -119,13 +142,84 @@ public class ChainberryTrustWalletCoreModule: Module {
     }
   }
 
+  // MARK: - Lifecycle serialization (see docs/adr/0002)
+
+  /// Serializes create/import/delete against each other — a `Task`-based actor rather than
+  /// `NSLock`, since these calls `await` across the biometric prompt and holding an `NSLock`
+  /// across a suspension point (where Swift Concurrency may resume on a different underlying
+  /// thread) is unsafe.
+  private actor LifecycleLock {
+    private var locked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Non-blocking: returns `false` immediately if already held (used by create/import, which
+    /// reject rather than queue).
+    func tryAcquire() -> Bool {
+      guard !locked else { return false }
+      locked = true
+      return true
+    }
+
+    /// Blocking: waits until the lock is free, then acquires it (used by delete, which queues).
+    func acquire() async {
+      guard locked else {
+        locked = true
+        return
+      }
+      await withCheckedContinuation { waiters.append($0) }
+    }
+
+    /// Hands ownership directly to the next waiter rather than freeing the lock and letting
+    /// every waiter race a fresh `tryAcquire`/`acquire`.
+    func release() {
+      if !waiters.isEmpty {
+        waiters.removeFirst().resume()
+      } else {
+        locked = false
+      }
+    }
+  }
+
+  private static let lifecycleLock = LifecycleLock()
+
+  /// Serializes `body` — including the biometric/passcode prompt, not just the store writes —
+  /// against every other lifecycle-mutating call, so at most one is ever touching the shared
+  /// metadata store at a time (see docs/adr/0002). Also forecloses a second, separate bug: two
+  /// concurrent `LAContext` evaluations racing each other.
+  ///
+  /// `rejectIfBusy` chooses the policy for a caller that finds the lock already held:
+  /// `createWallet`/`importWallet` reject immediately (`ERR_WALLET_OPERATION_IN_PROGRESS`) so a
+  /// double-tap can never mint two wallets; `deleteWallet` queues instead, since two distinct
+  /// deletes are both legitimate and should both eventually happen.
+  private static func withLifecycleLock<T>(rejectIfBusy: Bool, _ body: () async throws -> T) async throws -> T {
+    if rejectIfBusy {
+      guard await lifecycleLock.tryAcquire() else {
+        throw Exception(
+          name: "OperationInProgress",
+          description: "Another wallet operation is already in progress",
+          code: "ERR_WALLET_OPERATION_IN_PROGRESS"
+        )
+      }
+    } else {
+      await lifecycleLock.acquire()
+    }
+    do {
+      let result = try await body()
+      await lifecycleLock.release()
+      return result
+    } catch {
+      await lifecycleLock.release()
+      throw error
+    }
+  }
+
   // MARK: - Helpers
 
   /// Presents a native UIAlertController showing decoded tx details (chain, recipient, amount,
   /// fee). The user must tap "Confirm & Sign" before biometric auth fires — this is the only
   /// place in the native module where informed consent is collected.
   private static func confirmTransaction(chain: ChainKey, unsignedTx: [String: Any]) async throws {
-    let message = ChainSigner.buildSummary(chain: chain, unsignedTx: unsignedTx)
+    let message = try ChainSigner.buildSummary(chain: chain, unsignedTx: unsignedTx)
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
       DispatchQueue.main.async {
         let scene = UIApplication.shared.connectedScenes
@@ -160,7 +254,7 @@ public class ChainberryTrustWalletCoreModule: Module {
     try NativeWalletStore.saveMnemonic(wallet.mnemonic, walletId: walletId)
     do {
       var metadata = try NativeWalletStore.loadMetadata()
-      metadata[walletId] = addresses
+      metadata[walletId] = NativeWalletStore.WalletRecord(isTestnet: isTestnet, addresses: addresses)
       try NativeWalletStore.saveMetadata(metadata)
     } catch {
       // The mnemonic is already persisted but has no metadata pointer — compensate by
@@ -171,7 +265,7 @@ public class ChainberryTrustWalletCoreModule: Module {
       throw error
     }
 
-    return ["walletId": walletId, "addresses": addresses]
+    return ["walletId": walletId, "addresses": addresses, "isTestnet": isTestnet]
   }
 
   /// Prompts biometry-or-device-passcode via `.deviceOwnerAuthentication` (Apple's

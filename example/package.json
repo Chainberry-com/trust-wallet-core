@@ -1,0 +1,17 @@
+{
+  "name": "trust-wallet-core-example",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CI-only Expo host app for @chainberry/trust-wallet-core. Not published — see README.md.",
+  "main": "index.js",
+  "scripts": {
+    "prebuild:android": "expo prebuild --platform android --no-install"
+  },
+  "dependencies": {
+    "@chainberry/trust-wallet-core": "file:..",
+    "expo": "56.0.6",
+    "expo-modules-core": "56.0.13",
+    "react": "19.2.3",
+    "react-native": "0.85.3"
+  }
+}

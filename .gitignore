@@ -16,5 +16,11 @@ ios/Pods/
 # macOS
 .DS_Store
 
+# dependencies
+node_modules/
+
 # typescript
 *.tsbuildinfo
+
+# CI tools downloaded locally (binary downloaded by CI script, not part of repo)
+ktlint

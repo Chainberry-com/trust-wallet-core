@@ -32,6 +32,9 @@ export type Chain =
 export type WalletSummary = {
   walletId: string;
   addresses: Record<Chain, string>;
+  /** Fixed at creation time and persisted as immutable native wallet metadata — the
+   * authoritative source `signTransaction` derives/signs with for this wallet. */
+  isTestnet: boolean;
 };
 
 export type SignResult = {
@@ -47,15 +50,23 @@ const TrustWalletCore = requireNativeModule("TrustWalletCore");
  * would derive addresses from a seed different from the one actually used to sign.
  * `isTestnet` selects the address format for BTC/LTC/BCH (every other chain's address is
  * identical on mainnet and testnet) — callers should pass `IS_TESTNET` from
- * `@/constants/wallet-env`. */
-export async function createWallet(strength: 128 | 256 = 128, isTestnet = false): Promise<WalletSummary> {
+ * `@/constants/wallet-env`. The value passed here is permanent: it's persisted as immutable
+ * per-wallet metadata and later read back by `signTransaction` for this wallet — it cannot be
+ * changed or overridden after creation. */
+export async function createWallet(
+  strength: 128 | 256 = 128,
+  isTestnet = false,
+): Promise<WalletSummary> {
   return TrustWalletCore.createWallet(strength, isTestnet);
 }
 
 /** One-time mnemonic exposure from the caller — persisted natively immediately, never
  * retained in JS after this call returns. No BIP-39 passphrase support (see `createWallet`).
- * `isTestnet` — see `createWallet`. */
-export async function importWallet(mnemonic: string, isTestnet = false): Promise<WalletSummary> {
+ * `isTestnet` — see `createWallet` (same permanence guarantee applies). */
+export async function importWallet(
+  mnemonic: string,
+  isTestnet = false,
+): Promise<WalletSummary> {
   return TrustWalletCore.importWallet(mnemonic, isTestnet);
 }
 
@@ -69,16 +80,16 @@ export async function deleteWallet(walletId: string): Promise<void> {
 }
 
 /** Triggers the native biometry/passcode prompt, then signs entirely in-process —
- * only signed transaction bytes/hex cross back. `isTestnet` must match whatever
- * `createWallet`/`importWallet` used for this wallet (see those for why) — pass
- * `IS_TESTNET` from `@/constants/wallet-env`. */
+ * only signed transaction bytes/hex cross back. Network mode (mainnet/testnet) is not
+ * accepted here: the native module reads it from the wallet's own persisted record (set once,
+ * at `createWallet`/`importWallet` time), so it can never drift from what created the
+ * wallet's addresses. */
 export async function signTransaction(
   walletId: string,
   chain: Chain,
   unsignedTx: Record<string, unknown>,
-  isTestnet = false,
 ): Promise<SignResult> {
-  return TrustWalletCore.signTransaction(walletId, chain, unsignedTx, isTestnet);
+  return TrustWalletCore.signTransaction(walletId, chain, unsignedTx);
 }
 
 /** The one sanctioned mnemonic exposure — explicit backup/reveal flow only, gated behind

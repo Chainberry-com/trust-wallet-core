@@ -173,15 +173,24 @@ enum NativeWalletStore {
     }
   }
 
-  // MARK: - Metadata (ungated: walletId -> { chain: address })
+  // MARK: - Metadata (ungated: walletId -> { isTestnet, addresses: { chain: address } })
+
+  /// A wallet's network mode is fixed at creation time (`ChainberryTrustWalletCoreModule
+  /// .persistNewWallet`) and never changes thereafter — `isTestnet` is the authoritative value
+  /// `signTransaction` must derive/sign with, replacing the old pattern of accepting it fresh as
+  /// a parameter on every call.
+  struct WalletRecord: Codable {
+    var isTestnet: Bool
+    var addresses: [String: String]
+  }
 
   /// Atomically replaces the metadata blob via `SecItemUpdate` when it already exists,
   /// falling back to `SecItemAdd` only on the very first write. Unlike the mnemonic item,
   /// the metadata item carries no `SecAccessControl`, so there's no access-control-change
   /// obstacle to updating in place — this removes the delete-then-add race window entirely
   /// (a crash between delete and add used to be able to lose the index outright).
-  static func saveMetadata(_ wallets: [String: [String: String]]) throws {
-    let data = try JSONSerialization.data(withJSONObject: wallets)
+  static func saveMetadata(_ wallets: [String: WalletRecord]) throws {
+    let data = try JSONEncoder().encode(wallets)
     let baseQuery: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: metadataService,
@@ -208,8 +217,10 @@ enum NativeWalletStore {
   /// from a genuine read/corruption failure, which now throws instead of being silently
   /// masked as an empty map. Masking it was the root cause of the "transient read failure
   /// followed by createWallet overwrites the index" scenario: a real failure here must abort
-  /// the caller, not look identical to "no wallets yet".
-  static func loadMetadata() throws -> [String: [String: String]] {
+  /// the caller, not look identical to "no wallets yet". Data written by a pre-migration build
+  /// (walletId -> {chain: address} with no isTestnet/addresses wrapper) fails to decode and is
+  /// treated the same as any other corruption — there is no legacy-shape fallback.
+  static func loadMetadata() throws -> [String: WalletRecord] {
     let query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: metadataService,
@@ -224,9 +235,65 @@ enum NativeWalletStore {
     guard status == errSecSuccess, let data = result as? Data else {
       throw classify(status)
     }
-    guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: [String: String]] else {
+    guard let obj = try? JSONDecoder().decode([String: WalletRecord].self, from: data) else {
       throw NativeWalletStoreError.corrupted("metadata JSON is unreadable")
     }
     return obj
+  }
+
+  // MARK: - Reconciliation (see CONTEXT.md "orphan"/"reconciliation pass", docs/adr/0001)
+
+  /// Runs once at module init (see `TrustWalletCoreModule`'s `OnCreate`), before the JS layer can
+  /// issue its first `createWallet`/`importWallet`/`deleteWallet` call — the actual source of
+  /// crash-safety for an interrupted create or delete, not the in-call rollback in
+  /// `persistNewWallet`. Finds every Keychain item under `walletServicePrefix` with no matching
+  /// metadata entry and deletes it.
+  ///
+  /// Enumeration requires listing *every* generic-password item (`kSecMatchLimitAll`) — the
+  /// Keychain has no service-prefix query — and filtering client-side; this is safe today because
+  /// nothing else in this app touches the Keychain directly (see docs/adr/0001). If that ever
+  /// changes, this filter must stay airtight or it risks touching an unrelated item.
+  ///
+  /// Best-effort and never throws: any failure here is logged and skipped, since a broken
+  /// reconciliation pass must never become "the app won't launch." A metadata entry with no
+  /// matching Keychain item (the reverse shape — a "zombie") is deliberately left untouched here;
+  /// see `.notFound` and docs/adr/0001 for why.
+  static func reconcileOrphans() {
+    let liveIds: Set<String>
+    do {
+      liveIds = Set(try loadMetadata().keys)
+    } catch {
+      NSLog("[NativeWalletStore] reconciliation: failed to load metadata, skipping this pass entirely: \(error)")
+      return
+    }
+
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecMatchLimit as String: kSecMatchLimitAll,
+      kSecReturnAttributes as String: true,
+    ]
+    var result: AnyObject?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      NSLog("[NativeWalletStore] reconciliation: failed to enumerate Keychain items (OSStatus \(status))")
+      return
+    }
+    let items = (result as? [[String: Any]]) ?? []
+
+    for item in items {
+      guard let service = item[kSecAttrService as String] as? String,
+            service.hasPrefix(walletServicePrefix) else { continue }
+      let walletId = String(service.dropFirst(walletServicePrefix.count))
+      guard !liveIds.contains(walletId) else { continue }
+
+      let deleteStatus = SecItemDelete([
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: mnemonicAccount,
+      ] as CFDictionary)
+      if deleteStatus != errSecSuccess && deleteStatus != errSecItemNotFound {
+        NSLog("[NativeWalletStore] reconciliation: failed to delete orphaned item for \(walletId) (OSStatus \(deleteStatus))")
+      }
+    }
   }
 }

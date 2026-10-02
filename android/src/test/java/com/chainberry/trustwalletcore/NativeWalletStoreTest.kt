@@ -69,11 +69,26 @@ class NativeWalletStoreTest {
   fun metadata_roundTrips() {
     val file = File(tmp.root, "metadata.json")
     val wallets = mapOf(
-      "id-1" to mapOf("ethereum" to "0xabc"),
-      "id-2" to mapOf("bitcoin" to "bc1abc"),
+      "id-1" to NativeWalletStore.WalletRecord(isTestnet = false, addresses = mapOf("ethereum" to "0xabc")),
+      "id-2" to NativeWalletStore.WalletRecord(isTestnet = true, addresses = mapOf("bitcoin" to "bc1abc")),
     )
     NativeWalletStore.saveMetadataToFile(file, wallets)
     assertEquals(wallets, NativeWalletStore.loadMetadataFromFile(file))
+  }
+
+  @Test
+  fun metadata_legacyFlatShapeThrowsCorrupted_notSilentlyMisread() {
+    // Data written by a pre-migration build (walletId -> {chain: address} with no
+    // isTestnet/addresses wrapper) must never be silently reinterpreted — there is no
+    // migration path, so this must surface as Corrupted, same as any other unexpected shape.
+    val file = File(tmp.root, "metadata.json")
+    file.writeText("""{"id-1":{"ethereum":"0xabc"}}""")
+    try {
+      NativeWalletStore.loadMetadataFromFile(file)
+      fail("expected Corrupted for legacy flat-shape metadata")
+    } catch (e: NativeWalletStoreError.Corrupted) {
+      // expected
+    }
   }
 
   @Test
@@ -99,7 +114,7 @@ class NativeWalletStoreTest {
   @Test
   fun metadata_failedWrite_leavesExistingFileUntouched() {
     val target = File(tmp.root, "metadata.json")
-    val original = mapOf("id-1" to mapOf("ethereum" to "0xabc"))
+    val original = mapOf("id-1" to NativeWalletStore.WalletRecord(isTestnet = false, addresses = mapOf("ethereum" to "0xabc")))
     NativeWalletStore.saveMetadataToFile(target, original)
 
     // Making the parent directory read-only blocks creating the temp file at all (the
@@ -111,7 +126,10 @@ class NativeWalletStoreTest {
     target.parentFile!!.setWritable(false)
     try {
       try {
-        NativeWalletStore.saveMetadataToFile(target, mapOf("id-2" to mapOf("bitcoin" to "bc1xyz")))
+        NativeWalletStore.saveMetadataToFile(
+          target,
+          mapOf("id-2" to NativeWalletStore.WalletRecord(isTestnet = false, addresses = mapOf("bitcoin" to "bc1xyz"))),
+        )
         // Some filesystems/CI runners ignore setWritable(false) for the owner (e.g. root).
         // If the write unexpectedly succeeded, there's nothing to assert here.
       } catch (e: NativeWalletStoreError.PermissionDenied) {
@@ -270,5 +288,75 @@ class NativeWalletStoreTest {
   @Test
   fun describeLegacySecurityLevel_notInsideSecureHardwareIsSoftware() {
     assertEquals("SOFTWARE", NativeWalletStore.describeLegacySecurityLevel(false))
+  }
+
+  // ─── parseKeyAlias ───────────────────────────────────────────────────────────
+
+  @Test
+  fun parseKeyAlias_isTheInverseOfKeyAlias() {
+    val id = UUID.randomUUID().toString()
+    for (mode in AuthMode.entries) {
+      val alias = NativeWalletStore.keyAlias(mode, id)
+      assertEquals(mode to id, NativeWalletStore.parseKeyAlias(alias))
+    }
+  }
+
+  @Test
+  fun parseKeyAlias_legacyInfixDoesNotSwallowBioOrCredAliases() {
+    // Regression check: LEGACY_COMBINED's infix is "", which is a prefix of every alias under
+    // KEY_ALIAS_PREFIX — parseKeyAlias must still resolve a bio_/cred_ alias to its actual mode,
+    // not fall through to LEGACY_COMBINED just because the empty-infix check would also match.
+    val id = UUID.randomUUID().toString()
+    assertEquals(
+      AuthMode.BIOMETRIC_STRONG to id,
+      NativeWalletStore.parseKeyAlias(NativeWalletStore.keyAlias(AuthMode.BIOMETRIC_STRONG, id)),
+    )
+    assertEquals(
+      AuthMode.DEVICE_CREDENTIAL to id,
+      NativeWalletStore.parseKeyAlias(NativeWalletStore.keyAlias(AuthMode.DEVICE_CREDENTIAL, id)),
+    )
+  }
+
+  @Test
+  fun parseKeyAlias_unrelatedAliasReturnsNull() {
+    assertEquals(null, NativeWalletStore.parseKeyAlias("some_other_features_key"))
+  }
+
+  // ─── findOrphanFiles / findStaleMetadataTempFiles (reconciliation, docs/adr/0001) ────────────
+
+  @Test
+  fun findOrphanFiles_fileWithNoMetadataEntryIsOrphaned() {
+    File(tmp.root, "orphan-id.enc").writeBytes(byteArrayOf(1))
+    val orphans = NativeWalletStore.findOrphanFiles(tmp.root, liveIds = emptySet())
+    assertEquals(listOf("orphan-id.enc"), orphans.map { it.name })
+  }
+
+  @Test
+  fun findOrphanFiles_fileWithMatchingMetadataEntryIsNotOrphaned() {
+    File(tmp.root, "live-id.enc").writeBytes(byteArrayOf(1))
+    val orphans = NativeWalletStore.findOrphanFiles(tmp.root, liveIds = setOf("live-id"))
+    assertTrue(orphans.isEmpty())
+  }
+
+  @Test
+  fun findOrphanFiles_ignoresNonEncFiles() {
+    // metadata.json itself (and any stray temp file) must never be swept up as a wallet orphan.
+    File(tmp.root, "metadata.json").writeText("{}")
+    val orphans = NativeWalletStore.findOrphanFiles(tmp.root, liveIds = emptySet())
+    assertTrue(orphans.isEmpty())
+  }
+
+  @Test
+  fun findStaleMetadataTempFiles_findsLeftoverTempFile() {
+    // Simulates a saveMetadataToFile interrupted after the temp write but before the rename.
+    File(tmp.root, "metadata.json.tmp-12345").writeText("{}")
+    val stale = NativeWalletStore.findStaleMetadataTempFiles(tmp.root)
+    assertEquals(listOf("metadata.json.tmp-12345"), stale.map { it.name })
+  }
+
+  @Test
+  fun findStaleMetadataTempFiles_ignoresCommittedMetadataFile() {
+    File(tmp.root, "metadata.json").writeText("{}")
+    assertTrue(NativeWalletStore.findStaleMetadataTempFiles(tmp.root).isEmpty())
   }
 }

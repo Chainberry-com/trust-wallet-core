@@ -44,7 +44,7 @@ class AddressDerivationConformanceTest {
 
     // Chains with expected addresses confirmed against WalletCore 4.1.19, on a real device/emulator.
     // ETH / BNB / POL all share CoinType.ETHEREUM (same secp256k1 key, BIP44 m/44'/60'/0'/0/0).
-    val VERIFIED = mapOf(
+    val verified = mapOf(
       CoinType.ETHEREUM to "0x9858EfFD232B4033E47d90003D41EC34EcaEda94", // ethereum / bnb / polygon
       CoinType.SMARTCHAIN to "0x9858EfFD232B4033E47d90003D41EC34EcaEda94", // bnb (same key as ethereum)
       CoinType.BITCOIN to "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",
@@ -63,13 +63,13 @@ class AddressDerivationConformanceTest {
 
     // Steady state is empty — add a chain's CoinType here (and drop it from VERIFIED) only while
     // actively harvesting a newly-added chain's address for the first time.
-    val PENDING = emptyList<CoinType>()
+    val pending = emptyList<CoinType>()
   }
 
   @Test
   fun verifiedAddressesMatch() {
     val wallet = HDWallet(MNEMONIC, "")
-    for ((coin, expected) in VERIFIED) {
+    for ((coin, expected) in verified) {
       val actual = wallet.getAddressForCoin(coin)
       assertEquals("address mismatch for coin=${coin.name}", expected, actual)
     }
@@ -96,7 +96,7 @@ class AddressDerivationConformanceTest {
   @Test
   fun printPendingAddressesForVerification() {
     val wallet = HDWallet(MNEMONIC, "")
-    val lines = PENDING.map { coin -> "  ${coin.name} -> ${wallet.getAddressForCoin(coin)}" }
+    val lines = pending.map { coin -> "  ${coin.name} -> ${wallet.getAddressForCoin(coin)}" }
     println(
       "\n[AddressDerivationConformanceTest] Pending — verify and move to VERIFIED map:\n" +
         lines.joinToString("\n")

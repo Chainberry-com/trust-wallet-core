@@ -10,7 +10,7 @@ Supported chains: Ethereum, BNB Smart Chain, Polygon, Solana, Tron, TON, Bitcoin
 npx expo install @chainberry/trust-wallet-core
 ```
 
-This is an Expo config plugin module with native Android/iOS code, so it requires a development build (`expo prebuild` / EAS Build) — it will not work in Expo Go.
+This is an Expo native module with native Android/iOS code. It uses Expo's autolinking mechanism and does not ship an Expo config plugin. A development build is required (`expo prebuild` / EAS Build) — it will not work in Expo Go.
 
 ### Android: no GitHub credentials needed
 
@@ -24,10 +24,43 @@ GitHub Packages auth is still needed (via `GITHUB_ACTOR`/`GITHUB_TOKEN` env vars
 
 Android biometric gating additionally pulls in `androidx.biometric:biometric:1.1.0`.
 
+## Publish
+
+This package is consumed by the app via `file:modules/trust-wallet-core` (see the root
+`package.json`), not an npm workspace under `packages/*` — so, unlike
+`@chainberry/expo-wallet-sdk`, there's no `-w` flag to use; run these from inside this directory.
+There's also no build step: this package ships its TypeScript source directly (`main`/`types`
+point at `src/index.ts`), so no `prepublishOnly` rebuild happens either.
+
+1. Bump the version (in `package.json`, or via):
+   ```sh
+   cd modules/trust-wallet-core
+   npm version patch   # or minor / major
+   ```
+2. Dry-run first — prints exactly what would be published without touching the registry:
+   ```sh
+   npm publish --dry-run
+   ```
+3. Publish for real:
+   ```sh
+   npm publish
+   ```
+   `publishConfig.access: "public"` in this package's own `package.json` already covers the
+   `--access public` flag scoped packages otherwise need.
+
+Requires npm registry publish auth (an `_authToken` for `@chainberry`, e.g. via `.npmrc` — not
+committed to git). This is separate from the GitHub Packages auth mentioned above, which is only
+needed for bumping the pinned Android wallet-core artifact, not for publishing this npm package.
+
 ## Usage
 
 ```ts
-import { createWallet, importWallet, signTransaction, exportMnemonic } from "@chainberry/trust-wallet-core";
+import {
+  createWallet,
+  importWallet,
+  signTransaction,
+  exportMnemonic,
+} from "@chainberry/trust-wallet-core";
 
 const { walletId, addresses } = await createWallet(); // 128-bit / 12-word by default
 // addresses: { ethereum: "0x...", solana: "...", bnb: "0x...", bitcoin: "...", ... }
@@ -46,7 +79,7 @@ const mnemonic = await exportMnemonic(walletId);
 - `createWallet(strength = 128)` — generates a new BIP-39 mnemonic and persists it natively (Keychain on iOS / Keystore-backed file on Android, biometry-or-passcode gated). Returns `{ walletId, addresses }` — the mnemonic itself never leaves native code. No BIP-39 passphrase support: `signTransaction` always reconstructs the wallet with an empty passphrase, so a caller-supplied one would derive addresses from a seed different from the one actually used to sign.
 - `importWallet(mnemonic)` — validates and persists an existing mnemonic the same way. The `mnemonic` argument is a one-time exposure from the caller (e.g. a text-entry backup-restore screen); discard your own copy immediately after this call resolves.
 - `listWallets()` — returns `{ walletId, addresses }[]` for every persisted wallet, reading only the ungated metadata store. No biometric prompt.
-- `deleteWallet(walletId)` — removes the wallet's native key material and metadata entry. Irreversible; not biometric-gated (deleting reveals nothing, so this is a UX confirmation concern, not a key-secrecy one).
+- `deleteWallet(walletId)` — removes the wallet's native key material and metadata entry. Irreversible; requires a fresh biometric/passcode confirmation before deletion proceeds on both platforms.
 - `signTransaction(walletId, chain, unsignedTx)` — triggers a native biometry/passcode prompt, then derives the key and signs entirely inside native code. Returns `{ signedTx, meta? }`; `meta` currently only carries TON's `txHash`.
 - `exportMnemonic(walletId)` — the one sanctioned mnemonic exposure. Biometry/passcode gated. Use only for an explicit "reveal recovery phrase" backup screen; don't hold the result in app state beyond that screen's lifetime.
 
@@ -64,9 +97,13 @@ Both platforms pin **Trust Wallet Core 4.1.19** (`com.trustwallet:wallet-core:4.
 
 **Address derivation is verified for all 10 chains** in `conformance/address-derivation-vectors.json`, asserted by the Android instrumented test (`src/androidTest/.../AddressDerivationConformanceTest.kt`; run via `./gradlew connectedDebugAndroidTest`). Methodology: real on-device 4.1.19 addresses were harvested from the instrumented test running on an emulator, cross-checked against an independent derivation via the WASM build (`@trustwallet/wallet-core` 3.3.3, run standalone in Node — a different upstream release than the pinned 4.1.19, used only as a second data point); on-device 4.1.19 is authoritative wherever the two disagree, since that's what the app actually ships. They agreed on 6 of 7 previously-pending chains exactly; `ton` disagreed only in address-flag encoding (bounceable vs. non-bounceable — same underlying key/hash, see that fixture entry's `_note`). This same run also caught a real bug: the Ethereum/BNB/Polygon address that had been marked `"verified"` since before this pass was actually wrong — the instrumented test that should have caught it had never successfully executed (two pre-existing bugs: `coin.name()` didn't compile against this Kotlin binding, and no `testInstrumentationRunner` was configured, so `connectedAndroidTest` silently ran "0 tests" instead of failing). Both are fixed now; see the test file's header comment for details.
 
-**Byte-for-byte signing output is verified for 8 of 9 signable chains** in `conformance/signing-vectors.json`, asserted by `src/androidTest/.../SigningConformanceTest.kt`. Each vector calls `ChainSigner.sign()` — the same call path production code uses — with a fixed, deterministic (not necessarily broadcast-valid) unsigned tx. `ton` is verified but *not* byte-exact-asserted: `signTon()` embeds a wall-clock `expireAt` into the signed payload, so its output legitimately differs every run — the test instead checks the output is a well-formed signed BOC. `bitcoincash` has no signing vector (sending is unsupported, see above).
+**Byte-for-byte signing output is verified for 8 of 9 signable chains** in `conformance/signing-vectors.json`, asserted by `src/androidTest/.../SigningConformanceTest.kt`. Each vector calls `ChainSigner.sign()` — the same call path production code uses — with a fixed, deterministic (not necessarily broadcast-valid) unsigned tx. `ton` is verified but _not_ byte-exact-asserted: `signTon()` embeds a wall-clock `expireAt` into the signed payload, so its output legitimately differs every run — the test instead checks the output is a well-formed signed BOC. `bitcoincash` has no signing vector (sending is unsupported, see above).
 
-**iOS gap — not closed by this pass.** No Swift/Xcode toolchain was available in the environment that did this verification, so none of the above has been independently confirmed on iOS. `ChainKey.coinType` maps identically to Android's, so derivation *should* match, but this hasn't been checked on-device. `ConformanceTests/` currently has no address-derivation or signing test target at all (only the pre-existing amount-parsing one) — before this finding is fully closed for both platforms, an iOS engineer needs to (1) add `AddressDerivationConformanceTests`/`SigningConformanceTests` targets mirroring the Android ones, (2) run them against these same fixtures on a Mac, and (3) specifically resolve the **Tron divergence**: Android's `signTron` signs just the `txId` digest and reassembles JSON in app code, while iOS's hands wallet-core the full `rawJson` and returns its own reconstruction — `conformance/signing-vectors.json`'s `tron` entry spells out exactly what to check (the embedded signature hex must match Android's byte-for-byte; a mismatch there is a real bug, not a formatting difference).
+Both Android suites are CI-gated on every push/PR (`.github/workflows/ci.yml`'s `android-unit-tests` and `android-instrumented-tests` jobs, via `example/` — see that folder's README for why an Expo host app is needed to build this module at all). iOS is CI-gated via the `ios-conformance-tests` job: `expo prebuild` generates the Xcode workspace, `pod install` wires up the `ConformanceTests` test_spec declared in the podspec (CocoaPods includes test_specs automatically — there is no `--include-test-specs` flag), and `xcodebuild test` runs both `AddressDerivationConformanceTests` and `SigningConformanceTests` on an iPhone 16 simulator.
+
+**Tron divergence resolved.** iOS's `signTron` used to hand wallet-core the full `rawJson` and return its own reconstruction, diverging from Android's `txId`-only input + manual JSON reassembly — and `TronSigningInput` has no `rawJson` field in the pinned 4.1.19 anyway, so the old iOS code didn't compile. iOS now signs the same way Android does: `TronSigningInput.txID` set to the digest, signature reassembled into `{...tx, signature}` in app code (see `ios/ChainSigning.swift`'s `signTron`). Same key + same digest is guaranteed to produce the same ECDSA signature, so this is a structural fix, not something that needs a device to confirm.
+
+**iOS conformance suites are wired via CocoaPods `test_spec`.** `ios/ConformanceTests/AddressDerivationConformanceTests.swift` and `SigningConformanceTests.swift` mirror the Android fixtures above (all 10 address-derivation chains, the same 8 signing vectors, including a `testTron()` that asserts the reassembled signature matches Android's byte-for-byte). Both are declared as a `test_spec 'ConformanceTests'` in `ChainberryTrustWalletCoreModule.podspec`, which links them against `TrustWalletCore 4.1.19` and embeds the JSON fixtures as bundle resources. Running `pod install` from `example/ios` creates the `ChainberryTrustWalletCoreModule-ConformanceTests` scheme in the workspace automatically. The `ConformanceTests/` SwiftPM package continues to test only amount-parsing (no WalletCore dependency, runs standalone via `swift test`). The `tron` signing vector remains `"verified-android-only"` in the JSON until the iOS CI job's first green run confirms the signature matches byte-for-byte.
 
 ## License
 

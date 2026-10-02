@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "trust-wallet-core-example",
+    "slug": "trust-wallet-core-example",
+    "version": "1.0.0",
+    "android": {
+      "package": "com.chainberry.trustwalletcore.example"
+    }
+  }
+}
