@@ -21,6 +21,7 @@ import wallet.core.jni.proto.Cosmos
 import wallet.core.jni.proto.Ethereum
 import wallet.core.jni.proto.Ripple
 import wallet.core.jni.proto.Solana
+import wallet.core.jni.proto.Sui
 import wallet.core.jni.proto.Tezos
 import wallet.core.jni.proto.TheOpenNetwork
 import wallet.core.jni.proto.Tron
@@ -59,7 +60,8 @@ enum class ChainKey(val coinType: CoinType) {
   COSMOS(CoinType.COSMOS),
   APTOS(CoinType.APTOS),
   TEZOS(CoinType.TEZOS),
-  CARDANO(CoinType.CARDANO);
+  CARDANO(CoinType.CARDANO),
+  SUI(CoinType.SUI);
 
   val symbol: String get() = when (this) {
     ETHEREUM -> "ETH"; BNB -> "BNB"; POLYGON -> "POL"
@@ -70,6 +72,7 @@ enum class ChainKey(val coinType: CoinType) {
     APTOS -> "APT"
     TEZOS -> "XTZ"
     CARDANO -> "ADA"
+    SUI -> "SUI"
   }
 
   companion object {
@@ -176,6 +179,7 @@ object ChainSigner {
     ChainKey.APTOS -> ChainSignResult(signAptos(wallet, unsignedTx), null)
     ChainKey.TEZOS -> ChainSignResult(signTezos(wallet, unsignedTx), null)
     ChainKey.CARDANO -> ChainSignResult(signCardano(wallet, unsignedTx), null)
+    ChainKey.SUI -> ChainSignResult(signSui(wallet, unsignedTx), null)
   }
 
   // MARK: - EVM (ethereum / bnb / polygon)
@@ -681,6 +685,53 @@ object ChainSigner {
     if (output.error != Common.SigningError.OK) throw ChainSigningException("Cardano signing failed: ${output.errorMessage}")
     return output.encoded.toByteArray().toHex()
   }
+
+  // Sui (SUI)
+  // unsignedTx: { inputCoins: [{objectId, version (Long), digest}], recipient, amount (MIST string),
+  //              gasBudget (string), referenceGasPrice (string) }
+  // Returns JSON string: { "unsignedTx": "<base64>", "signature": "<base64>" }
+  @Suppress("UNCHECKED_CAST")
+  private fun signSui(wallet: HDWallet, unsignedTx: Map<String, Any>): String {
+    val privateKey = wallet.getKeyForCoin(CoinType.SUI)
+    val coinsRaw = unsignedTx["inputCoins"] as? List<Map<String, Any>>
+      ?: throw ChainSigningException("Missing inputCoins")
+    val recipient = unsignedTx["recipient"] as? String ?: throw ChainSigningException("Missing recipient")
+    val amount = (unsignedTx["amount"] as? String)?.toLong() ?: throw ChainSigningException("Missing amount")
+    val gasBudget = (unsignedTx["gasBudget"] as? String)?.toLong() ?: throw ChainSigningException("Missing gasBudget")
+    val refGasPrice = (unsignedTx["referenceGasPrice"] as? String)?.toLong() ?: throw ChainSigningException("Missing referenceGasPrice")
+
+    val inputCoins = coinsRaw.map { c ->
+      val objectId = c["objectId"] as? String ?: throw ChainSigningException("Missing objectId")
+      val version = (c["version"] as? Number)?.toLong() ?: throw ChainSigningException("Missing version")
+      val digest = c["digest"] as? String ?: throw ChainSigningException("Missing digest")
+      Sui.ObjectRef.newBuilder()
+        .setObjectId(objectId)
+        .setVersion(version)
+        .setObjectDigest(digest)
+        .build()
+    }
+
+    val paySui = Sui.PaySui.newBuilder()
+      .addAllInputCoins(inputCoins)
+      .addRecipients(recipient)
+      .addAmounts(amount)
+      .build()
+
+    val input = Sui.SigningInput.newBuilder()
+      .setPaySui(paySui)
+      .setGasBudget(gasBudget)
+      .setReferenceGasPrice(refGasPrice)
+      .setPrivateKey(ByteString.copyFrom(privateKey.data()))
+      .build()
+
+    val output = AnySigner.sign(input, CoinType.SUI, Sui.SigningOutput.parser())
+    if (output.error != Common.SigningError.OK) throw ChainSigningException("Sui signing failed: ${output.errorMessage}")
+
+    return JSONObject().apply {
+      put("unsignedTx", output.unsignedTx)
+      put("signature", output.signature)
+    }.toString()
+  }
 }
 
 // Transaction summary helpers (used by ChainberryTrustWalletCoreModule for native confirmation UI)
@@ -872,6 +923,15 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
       }
       (unsignedTx["changeAddress"] as? String)?.let { lines += "Change to: ${fmtAddr(it)}" }
       lines += "Fee: computed during signing"
+    }
+    ChainKey.SUI -> {
+      (unsignedTx["recipient"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
+      (unsignedTx["amount"] as? String)?.toLongOrNull()?.let {
+        lines += "Amount: ${fmtAmt(it.toDouble() / 1e9)} SUI"
+      }
+      (unsignedTx["gasBudget"] as? String)?.toLongOrNull()?.let {
+        lines += "Max fee: ${fmtAmt(it.toDouble() / 1e9)} SUI"
+      }
     }
   }
   return lines.joinToString("\n")

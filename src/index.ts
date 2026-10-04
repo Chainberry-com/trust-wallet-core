@@ -27,7 +27,8 @@ export type Chain =
   | "cosmos"
   | "aptos"
   | "tezos"
-  | "cardano";
+  | "cardano"
+  | "sui";
 
 export type WalletSummary = {
   walletId: string;
