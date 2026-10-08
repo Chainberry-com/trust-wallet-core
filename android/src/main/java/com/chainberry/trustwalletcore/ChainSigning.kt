@@ -15,13 +15,13 @@ import wallet.core.jni.SolanaTransaction
 import wallet.core.jni.TransactionDecoder
 import wallet.core.jni.proto.Aptos
 import wallet.core.jni.proto.Bitcoin
+import wallet.core.jni.proto.Cardano
 import wallet.core.jni.proto.Common
 import wallet.core.jni.proto.Cosmos
-import wallet.core.jni.proto.Sui
-import wallet.core.jni.proto.Tezos
 import wallet.core.jni.proto.Ethereum
 import wallet.core.jni.proto.Ripple
 import wallet.core.jni.proto.Solana
+import wallet.core.jni.proto.Sui
 import wallet.core.jni.proto.Tezos
 import wallet.core.jni.proto.TheOpenNetwork
 import wallet.core.jni.proto.Tron
@@ -60,6 +60,7 @@ enum class ChainKey(val coinType: CoinType) {
   COSMOS(CoinType.COSMOS),
   APTOS(CoinType.APTOS),
   TEZOS(CoinType.TEZOS),
+  CARDANO(CoinType.CARDANO),
   SUI(CoinType.SUI);
 
   val symbol: String get() = when (this) {
@@ -70,6 +71,7 @@ enum class ChainKey(val coinType: CoinType) {
     COSMOS -> "ATOM"
     APTOS -> "APT"
     TEZOS -> "XTZ"
+    CARDANO -> "ADA"
     SUI -> "SUI"
   }
 
@@ -113,6 +115,14 @@ object ChainSigner {
    *  - Bitcoin Cash gets a legacy P2PKH address instead — a different *style* from its own
    *    mainnet cashaddr address (cashaddr testnet isn't implemented), but still a real,
    *    correctly-testnet-flagged one.
+   *  - Cardano: wallet-core's `CoinType.CARDANO` only derives a mainnet-network-tagged
+   *    (CIP-19 header byte low nibble = 1) address — there's no separate testnet CoinType or a
+   *    public network-id parameter on the Java/Kotlin binding. Reuses wallet-core's own
+   *    correctly-derived mainnet address, decodes it (plain BIP-173 bech32 — Cardano addresses
+   *    have no witness-version prefix, unlike BTC/LTC segwit), flips just the network-tag
+   *    nibble to 0, and re-encodes under the "addr_test" HRP. Mirrors iOS's
+   *    ChainSigning.swift exactly — verified there byte-for-byte against real mainnet and
+   *    Preprod addresses fetched from Koios.
    */
   fun addressForChain(wallet: HDWallet, chain: ChainKey, isTestnet: Boolean): String {
     if (!isTestnet) return wallet.getAddressForCoin(chain.coinType)
@@ -126,6 +136,14 @@ object ChainSigner {
       ChainKey.BITCOINCASH -> {
         val pubKey = keyForChain(wallet, chain, isTestnet = true).getPublicKeySecp256k1(true)
         BitcoinAddress(pubKey, BCH_TESTNET_P2PKH_PREFIX).description()
+      }
+      ChainKey.CARDANO -> {
+        val mainnetAddress = wallet.getAddressForCoin(CoinType.CARDANO)
+        val decoded = Bech32.decode(mainnetAddress)
+          ?: throw ChainSigningException("Could not decode wallet-core's Cardano mainnet address")
+        val bytes = decoded.second
+        bytes[0] = (bytes[0].toInt() and 0xF0).toByte()
+        Bech32.encode("addr_test", bytes)
       }
       // Everything else (EVM/Solana/Tron/Ton/Xrp) shares one address format across
       // mainnet/testnet — only the RPC endpoint differs, which lives entirely in JS.
@@ -160,6 +178,7 @@ object ChainSigner {
     ChainKey.COSMOS -> ChainSignResult(signCosmos(wallet, unsignedTx), null)
     ChainKey.APTOS -> ChainSignResult(signAptos(wallet, unsignedTx), null)
     ChainKey.TEZOS -> ChainSignResult(signTezos(wallet, unsignedTx), null)
+    ChainKey.CARDANO -> ChainSignResult(signCardano(wallet, unsignedTx), null)
     ChainKey.SUI -> ChainSignResult(signSui(wallet, unsignedTx), null)
   }
 
@@ -614,6 +633,59 @@ object ChainSigner {
     return output.encoded.toByteArray().toHex()
   }
 
+  // MARK: - Cardano (ADA)
+  // unsignedTx (from wallet-broadcast's prepareCardanoUtxoSet): { toAddress, changeAddress,
+  // sendAmountLovelace, ttl, inputs: [{ txHash, outputIndex, address, amountLovelace }] }
+  // No manual UTXO selection is done upstream — wallet-core's own doPlan()/
+  // selectInputsWithTokens performs coin selection internally given the full UTXO set.
+  @Suppress("UNCHECKED_CAST")
+  private fun signCardano(wallet: HDWallet, unsignedTx: Map<String, Any>): String {
+    val privateKey = wallet.getKeyForCoin(CoinType.CARDANO)
+    val toAddress = unsignedTx["toAddress"] as? String ?: throw ChainSigningException("Missing toAddress")
+    val changeAddress = unsignedTx["changeAddress"] as? String ?: throw ChainSigningException("Missing changeAddress")
+    val sendAmountLovelace = (unsignedTx["sendAmountLovelace"] as? String)?.toLongOrNull()
+      ?: throw ChainSigningException("Missing sendAmountLovelace")
+    val ttl = (unsignedTx["ttl"] as? Number)?.toLong() ?: throw ChainSigningException("Missing ttl")
+    val inputs = unsignedTx["inputs"] as? List<Map<String, Any>> ?: throw ChainSigningException("Missing inputs")
+
+    val transfer = Cardano.Transfer.newBuilder().apply {
+      this.toAddress = toAddress
+      this.changeAddress = changeAddress
+      this.amount = sendAmountLovelace
+      this.useMaxAmount = false
+    }.build()
+
+    val utxos = inputs.map { entry ->
+      val txHashHex = entry["txHash"] as? String ?: throw ChainSigningException("Invalid Cardano UTXO entry: missing txHash")
+      val outputIndex = (entry["outputIndex"] as? Number)?.toLong() ?: throw ChainSigningException("Invalid Cardano UTXO entry: missing outputIndex")
+      val address = entry["address"] as? String ?: throw ChainSigningException("Invalid Cardano UTXO entry: missing address")
+      val amount = (entry["amountLovelace"] as? String)?.toLongOrNull()
+        ?: throw ChainSigningException("Invalid Cardano UTXO entry: missing amountLovelace")
+
+      val outPoint = Cardano.OutPoint.newBuilder().apply {
+        this.txHash = ByteString.copyFrom(txHashHex.hexToBytes())
+        this.outputIndex = outputIndex
+      }.build()
+
+      Cardano.TxInput.newBuilder().apply {
+        this.outPoint = outPoint
+        this.address = address
+        this.amount = amount
+      }.build()
+    }
+
+    val input = Cardano.SigningInput.newBuilder().apply {
+      this.addPrivateKey(ByteString.copyFrom(privateKey.data()))
+      this.ttl = ttl
+      this.transferMessage = transfer
+      this.addAllUtxos(utxos)
+    }.build()
+
+    val output = AnySigner.sign(input, CoinType.CARDANO, Cardano.SigningOutput.parser())
+    if (output.error != Common.SigningError.OK) throw ChainSigningException("Cardano signing failed: ${output.errorMessage}")
+    return output.encoded.toByteArray().toHex()
+  }
+
   // Sui (SUI)
   // unsignedTx: { inputCoins: [{objectId, version (Long), digest}], recipient, amount (MIST string),
   //              gasBudget (string), referenceGasPrice (string) }
@@ -633,7 +705,7 @@ object ChainSigner {
       val version = (c["version"] as? Number)?.toLong() ?: throw ChainSigningException("Missing version")
       val digest = c["digest"] as? String ?: throw ChainSigningException("Missing digest")
       Sui.ObjectRef.newBuilder()
-        .setObjectID(objectId)
+        .setObjectId(objectId)
         .setVersion(version)
         .setObjectDigest(digest)
         .build()
@@ -843,6 +915,14 @@ internal fun ChainSigner.buildSummary(chain: ChainKey, unsignedTx: Map<String, A
         lines += "Fee: ${fmtAmt(it.toDouble() / 1_000_000.0)} XTZ"
       }
       if (unsignedTx["needsReveal"] == true) lines += "(includes reveal operation)"
+    }
+    ChainKey.CARDANO -> {
+      (unsignedTx["toAddress"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }
+      (unsignedTx["sendAmountLovelace"] as? String)?.toLongOrNull()?.let {
+        lines += "Amount: ${fmtAmt(it.toDouble() / 1_000_000.0)} ADA"
+      }
+      (unsignedTx["changeAddress"] as? String)?.let { lines += "Change to: ${fmtAddr(it)}" }
+      lines += "Fee: computed during signing"
     }
     ChainKey.SUI -> {
       (unsignedTx["recipient"] as? String)?.let { lines += "To: ${fmtAddr(it)}" }

@@ -14,6 +14,7 @@ enum ChainKey: String, CaseIterable {
   case cosmos
   case aptos
   case tezos
+  case cardano
   case sui
 
   init(fromJs raw: String) throws {
@@ -44,6 +45,7 @@ enum ChainKey: String, CaseIterable {
     case .cosmos:   return "ATOM"
     case .aptos:    return "APT"
     case .tezos:    return "XTZ"
+    case .cardano:  return "ADA"
     case .sui:      return "SUI"
     }
   }
@@ -64,7 +66,8 @@ enum ChainKey: String, CaseIterable {
     case .cosmos: return .cosmos
     case .aptos: return .aptos
     case .tezos: return .tezos
-    case .sui:   return .sui
+    case .cardano: return .cardano
+    case .sui: return .sui
     }
   }
 }
@@ -108,7 +111,7 @@ enum ChainSigner {
   ///  - Bitcoin Cash gets a legacy P2PKH address instead — a different *style* from its own
   ///    mainnet cashaddr address (cashaddr testnet isn't implemented), but still a real,
   ///    correctly-testnet-flagged one.
-  static func address(for chain: ChainKey, wallet: HDWallet, isTestnet: Bool) -> String {
+  static func address(for chain: ChainKey, wallet: HDWallet, isTestnet: Bool) throws -> String {
     guard isTestnet else { return wallet.getAddressForCoin(coin: chain.coinType) }
     switch chain {
     case .bitcoin:
@@ -119,6 +122,24 @@ enum ChainSigner {
     case .bitcoincash:
       let pubKey = key(for: chain, wallet: wallet, isTestnet: true).getPublicKeySecp256k1(compressed: true)
       return BitcoinAddress(publicKey: pubKey, prefix: bchTestnetP2PKHPrefix)!.description
+    case .cardano:
+      // wallet-core's Swift binding exposes only one `.cardano` CoinType (always the CIP-19
+      // "addr1..." mainnet-network-tag format) — no distinct testnet CoinType/derivation, and
+      // no public API to pass a network id into address generation (confirmed against the
+      // installed 4.1.19 binding: none of Cardano.swift/TWCardano.swift take one). Cardano's
+      // mainnet vs. testnet (Preprod) address differ only in that one network-tag nibble +
+      // bech32 HRP though — same payment/staking credential hashes either way — so this
+      // decodes wallet-core's own correctly-derived mainnet address, flips just that nibble,
+      // and re-encodes under "addr_test" (see Bech32.decode/encode above; verified byte-for-
+      // byte round-trip and header-byte layout against real mainnet and Preprod addresses
+      // fetched from Koios before writing this).
+      let mainnetAddress = wallet.getAddressForCoin(coin: .cardano)
+      guard let (_, bytes) = Bech32.decode(mainnetAddress), !bytes.isEmpty else {
+        throw Exception(name: "AddressDerivationFailed", description: "Could not decode wallet-core's Cardano mainnet address")
+      }
+      var testnetBytes = bytes
+      testnetBytes[0] = testnetBytes[0] & 0xF0 // clear the low nibble: network tag 1 (mainnet) -> 0 (testnet)
+      return Bech32.encode(hrp: "addr_test", data: testnetBytes)
     // Everything else (EVM/Solana/Tron/Ton/Xrp) shares one address format across
     // mainnet/testnet — only the RPC endpoint differs, which lives entirely in JS.
     default:
@@ -166,6 +187,8 @@ enum ChainSigner {
       return Result(signedTx: try signAptos(wallet: wallet, txParams: unsignedTx), meta: nil)
     case .tezos:
       return Result(signedTx: try signTezos(wallet: wallet, txParams: unsignedTx), meta: nil)
+    case .cardano:
+      return Result(signedTx: try signCardano(wallet: wallet, txParams: unsignedTx), meta: nil)
     case .sui:
       return Result(signedTx: try signSui(wallet: wallet, txParams: unsignedTx), meta: nil)
     }
@@ -681,7 +704,64 @@ enum ChainSigner {
     return output.encoded.hexString
   }
 
-  // MARK: - Transaction summary for native confirmation UI
+  // MARK: - Cardano (ADA)
+  // txParams (from wallet-broadcast's prepareCardanoUtxoSet): { toAddress, changeAddress,
+  // sendAmountLovelace (decimal string), ttl (slot number), inputs: [{ txHash (hex),
+  // outputIndex, address, amountLovelace (decimal string) }] }
+  // No manual coin selection here — WalletCore's Cardano signer (Signer.cpp's `doPlan()` /
+  // `selectInputsWithTokens`) does its own input selection + change calculation from the full
+  // UTXO set in `input.utxos`, so every entry in `inputs` is passed through as-is; JS's
+  // prepare step deliberately doesn't pre-select which UTXOs to spend (see cardano-broadcast.ts).
+  private static func signCardano(wallet: HDWallet, txParams: [String: Any]) throws -> String {
+    guard let toAddress = txParams["toAddress"] as? String,
+          let changeAddress = txParams["changeAddress"] as? String,
+          let sendAmountStr = txParams["sendAmountLovelace"] as? String,
+          let sendAmountLovelace = UInt64(sendAmountStr),
+          let ttlNum = txParams["ttl"] as? NSNumber,
+          let inputs = txParams["inputs"] as? [[String: Any]] else {
+      throw Exception(name: "InvalidParams", description: "Missing required Cardano tx params")
+    }
+
+    let privateKey = wallet.getKeyForCoin(coin: .cardano)
+
+    var transfer = CardanoTransfer()
+    transfer.toAddress = toAddress
+    transfer.changeAddress = changeAddress
+    transfer.amount = sendAmountLovelace
+    transfer.useMaxAmount = false
+
+    var input = CardanoSigningInput()
+    input.privateKey = [privateKey.data]
+    input.ttl = ttlNum.uint64Value
+    input.transferMessage = transfer
+
+    input.utxos = try inputs.map { entry in
+      guard let txHashHex = entry["txHash"] as? String,
+            let outputIndexNum = entry["outputIndex"] as? NSNumber,
+            let address = entry["address"] as? String,
+            let amountStr = entry["amountLovelace"] as? String,
+            let amount = UInt64(amountStr),
+            let txHashData = hexData(txHashHex) else {
+        throw Exception(name: "InvalidParams", description: "Invalid Cardano UTXO entry")
+      }
+
+      var outPoint = CardanoOutPoint()
+      outPoint.txHash = txHashData
+      outPoint.outputIndex = outputIndexNum.uint64Value
+
+      var utxo = CardanoTxInput()
+      utxo.outPoint = outPoint
+      utxo.address = address
+      utxo.amount = amount
+      return utxo
+    }
+
+    let output: CardanoSigningOutput = AnySigner.sign(input: input, coin: .cardano)
+    guard output.error == .ok else {
+      throw Exception(name: "SigningFailed", description: output.errorMessage)
+    }
+    return output.encoded.hexString
+  }
 
   // MARK: - Sui (SUI)
   // txParams: { inputCoins: [{objectId, version, digest}], recipient, amount (MIST string),
@@ -737,6 +817,8 @@ enum ChainSigner {
     let jsonData = try JSONSerialization.data(withJSONObject: result)
     return String(data: jsonData, encoding: .utf8) ?? "{}"
   }
+
+  // MARK: - Transaction summary for native confirmation UI
 
   static func buildSummary(chain: ChainKey, unsignedTx: [String: Any]) throws -> String {
     var lines = ["Network: \(chain.rawValue.uppercased())"]
@@ -926,6 +1008,17 @@ enum ChainSigner {
       if let reveal = unsignedTx["needsReveal"] as? Bool, reveal {
         lines.append("(includes reveal operation)")
       }
+
+    case .cardano:
+      if let to = unsignedTx["toAddress"] as? String { lines.append("To: \(fmtAddr(to))") }
+      if let lovelace = (unsignedTx["sendAmountLovelace"] as? String).flatMap(UInt64.init) {
+        lines.append("Amount: \(fmtAmt(Double(lovelace) / 1_000_000)) ADA")
+      }
+      if let change = unsignedTx["changeAddress"] as? String { lines.append("Change to: \(fmtAddr(change))") }
+      // Fee isn't known until signing — WalletCore selects the actual input set and computes
+      // the fee from the resulting tx size at that point (see signCardano's comment), so this
+      // can only show what inputs are available going in, not a precise fee.
+      lines.append("Fee: computed during signing")
 
     case .sui:
       if let to = unsignedTx["recipient"] as? String { lines.append("To: \(fmtAddr(to))") }

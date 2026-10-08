@@ -63,4 +63,56 @@ enum Bech32 {
     for d in combined { result.append(charset[d]) }
     return result
   }
+
+  /// 5-bit groups -> 8-bit bytes (BIP-173 "convertbits", 5→8, no padding — trailing bits must
+  /// be zero, matching how `convertBits8to5` always pads with zero bits).
+  private static func convertBits5to8(_ data: [Int]) -> Data? {
+    var acc = 0
+    var bits = 0
+    var out = Data()
+    for v in data {
+      acc = (acc << 5) | v
+      bits += 5
+      if bits >= 8 {
+        bits -= 8
+        out.append(UInt8((acc >> bits) & 0xff))
+      }
+    }
+    // Any remaining bits must be zero padding, not real data — a nonzero remainder means the
+    // input wasn't a valid 8-bit-aligned byte string to begin with.
+    if bits >= 5 || (acc & ((1 << bits) - 1)) != 0 { return nil }
+    return out
+  }
+
+  /// Plain BIP-173 bech32 decode — no witness-version handling (unlike `encodeSegwitV0`,
+  /// Cardano/CIP-19 addresses have no witness-version prefix; the payload is the raw header
+  /// byte + credential hash(es)). Returns `nil` on a malformed string or bad checksum.
+  static func decode(_ input: String) -> (hrp: String, data: Data)? {
+    let lower = input.lowercased()
+    guard lower == input || input.uppercased() == input else { return nil } // no mixed case
+    guard let sepIndex = lower.lastIndex(of: "1"), sepIndex != lower.startIndex else { return nil }
+    let hrp = String(lower[lower.startIndex..<sepIndex])
+    let dataPart = lower[lower.index(after: sepIndex)...]
+    guard dataPart.count >= 6 else { return nil } // 6-char checksum minimum
+    var values: [Int] = []
+    for c in dataPart {
+      guard let idx = charset.firstIndex(of: c) else { return nil }
+      values.append(idx)
+    }
+    let payload = Array(values.dropLast(6))
+    let checksum = Array(values.suffix(6))
+    guard createChecksum(hrp: hrp, data: payload) == checksum else { return nil }
+    guard let bytes = convertBits5to8(payload) else { return nil }
+    return (hrp, bytes)
+  }
+
+  /// Plain BIP-173 bech32 encode of raw bytes under `hrp` — the general form
+  /// `encodeSegwitV0` specializes (see above) for BTC/LTC's witness-version-0 addresses.
+  static func encode(hrp: String, data: Data) -> String {
+    let data5 = convertBits8to5(data)
+    let combined = data5 + createChecksum(hrp: hrp, data: data5)
+    var result = hrp + "1"
+    for d in combined { result.append(charset[d]) }
+    return result
+  }
 }
